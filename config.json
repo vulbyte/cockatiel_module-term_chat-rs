@@ -1,0 +1,7 @@
+{
+  "engine_port": 9734,
+  "pairing_pin": 957,
+  "process_position": "input",
+  "priority": 10,
+  "module_specific": null
+}

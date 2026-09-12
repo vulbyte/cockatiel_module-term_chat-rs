@@ -1,0 +1,12 @@
+{
+    "name": "term-chat", 
+    "description": "a terminal based display for showing the chat. good ",
+    "version": "0.1.0", 
+    "capabilities": "input",    
+    "root_file": "./src/main.rs",
+    "launch_command": "cargo run",
+    "command_flags": [
+        " --release"
+    ],
+    "autostart": true
+}
