@@ -24,7 +24,6 @@ use tracing::{warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use cockatiel_client::proto::container::Payload;
-use cockatiel_client::PromptKind;
 use futures_util::StreamExt;
 use prost::Message as ProstMessage;
 use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
@@ -278,7 +277,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.easing_target_per_min,
     )));
     let status: Arc<Mutex<AppStatus>> = Arc::new(Mutex::new(AppStatus::default()));
-    let prompt: Arc<Mutex<Option<types::PromptData>>> = Arc::new(Mutex::new(None));
     let renderer = Arc::new(ImageRenderer::new(
         config.ascii_converter_path.clone(),
         config.ascii_width,
@@ -390,7 +388,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         messages,
         pending,
         status,
-        prompt,
         &engine,
         &config,
         renderer,
@@ -414,7 +411,6 @@ async fn run_tui(
     messages: Arc<Mutex<Vec<ChatMessageItem>>>,
     pending: Arc<Mutex<EasingQueue>>,
     status: Arc<Mutex<AppStatus>>,
-    prompt: Arc<Mutex<Option<types::PromptData>>>,
     engine: &EngineHandle,
     config: &ChatConfig,
     renderer: Arc<ImageRenderer>,
@@ -444,25 +440,12 @@ async fn run_tui(
             maybe_event = event_rx.recv() => {
                 match maybe_event {
                     Some(ev) => {
-                        if handle_event(ev, &mut ui, &mut login, &prompt, engine, config, &messages).await? {
+                        if handle_event(ev, &mut ui, &mut login, engine, config, &messages).await? {
                             break;
                         }
                         needs_redraw = true;
                     }
                     None => break,
-                }
-            }
-        }
-
-        // Auto-deny a prompt the user never answered.
-        {
-            let mut prompt_guard = prompt.lock().await;
-            if let Some(p) = prompt_guard.as_ref() {
-                if Instant::now() >= p.deadline {
-                    let id = p.prompt.prompt_id_uuid7.clone();
-                    let _ = engine.send_prompt_response(&id, false, "").await;
-                    *prompt_guard = None;
-                    needs_redraw = true;
                 }
             }
         }
@@ -513,7 +496,6 @@ async fn run_tui(
             }
             let msgs = messages.lock().await;
             let status_guard = status.lock().await;
-            let prompt_guard = prompt.lock().await;
             render::draw(
                 stdout,
                 cols as usize,
@@ -523,7 +505,6 @@ async fn run_tui(
                 &status_guard,
                 config,
                 Some(&login),
-                prompt_guard.as_ref(),
             )?;
         }
     }
@@ -537,15 +518,13 @@ async fn handle_event(
     ev: crossterm::event::Event,
     ui: &mut Ui,
     login: &mut LoginState,
-    prompt: &Arc<Mutex<Option<types::PromptData>>>,
     engine: &EngineHandle,
     config: &ChatConfig,
     messages: &Arc<Mutex<Vec<ChatMessageItem>>>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     match ev {
         crossterm::event::Event::Key(key) => {
-            handle_key(key, ui, login, prompt, engine, config, messages).await?;
-            Ok(false)
+            handle_key(key, ui, login, engine, config, messages).await
         }
         crossterm::event::Event::Mouse(m) => {
             match m.kind {
@@ -564,63 +543,24 @@ async fn handle_event(
     }
 }
 
+/// Returns true when the app should quit.
 async fn handle_key(
     key: KeyEvent,
     ui: &mut Ui,
     login: &mut LoginState,
-    prompt: &Arc<Mutex<Option<types::PromptData>>>,
     engine: &EngineHandle,
     config: &ChatConfig,
     messages: &Arc<Mutex<Vec<ChatMessageItem>>>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<bool, Box<dyn std::error::Error>> {
     let KeyEvent { code, .. } = key;
 
     // Global quit.
     // Ctrl+C is deliberately NOT intercepted to quit — in a terminal it is the
     // copy shortcut, so quitting on it breaks copy/paste. Use `q` instead.
 
-    // If a prompt (e.g. an audit review) is awaiting an answer, act on it. A
-    // boolean prompt answers y/n; string/credential prompts accept typing +
-    // Enter (credentials are masked on display).
-    {
-        let mut prompt_guard = prompt.lock().await;
-        if let Some(p) = prompt_guard.as_mut() {
-            let id = p.prompt.prompt_id_uuid7.clone();
-            if p.prompt.kind() != PromptKind::Boolean {
-                match code {
-                    KeyCode::Char(c) => p.text_input.push(c),
-                    KeyCode::Backspace => {
-                        p.text_input.pop();
-                    }
-                    KeyCode::Enter => {
-                        let text = p.text_input.clone();
-                        let _ = engine.send_prompt_response(&id, true, &text).await;
-                        *prompt_guard = None;
-                    }
-                    KeyCode::Esc => {
-                        let _ = engine.send_prompt_response(&id, false, "").await;
-                        *prompt_guard = None;
-                    }
-                    _ => {}
-                }
-                return Ok(());
-            }
-            let accepted = match code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => Some(true),
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Some(false),
-                _ => None,
-            };
-            if let Some(accepted) = accepted {
-                let _ = engine.send_prompt_response(&id, accepted, "").await;
-                *prompt_guard = None;
-            }
-            return Ok(());
-        }
-    }
-
     match ui.mode {
         UiMode::Chat => match code {
-            KeyCode::Char('q') => std::process::exit(0),
+            KeyCode::Char('q') => return Ok(true),
             KeyCode::Char('l') => {
                 ui.mode = UiMode::LoginMenu;
                 ui.login_note.clear();
@@ -777,7 +717,7 @@ async fn handle_key(
             _ => {}
         },
     }
-    Ok(())
+    Ok(false)
 }
 
 async fn do_login(

@@ -138,7 +138,6 @@ pub fn draw(
     status: &AppStatus,
     config: &ChatConfig,
     login: Option<&LoginState>,
-    prompt: Option<&crate::types::PromptData>,
 ) -> io::Result<()> {
     stdout.execute(cursor::MoveTo(0, 0))?;
     stdout.execute(terminal::Clear(ClearType::All))?;
@@ -295,9 +294,9 @@ pub fn draw(
     let footer = if ui.mode == UiMode::Input {
         " input: type + enter to send | tab: platform | esc: cancel "
     } else if login.is_some() && login.map(|l| l.can_moderate()).unwrap_or(false) {
-        " ctrl+c/q: exit | l: login | i: send | up/down/wheel: scroll | enter: mod menu | esc: back "
+        " q: exit | l: login | i: send | up/down/wheel: scroll | enter: mod menu | esc: back "
     } else {
-        " ctrl+c/q: exit | l: login | up/down/wheel: scroll "
+        " q: exit | l: login | up/down/wheel: scroll "
     };
     let padded_footer = format!("{:^width$}", footer, width = cols_usize);
     print!("\x1b[90m{}\x1b[0m", padded_footer);
@@ -305,102 +304,7 @@ pub fn draw(
     // 5. Overlays
     draw_overlays(stdout, cols, rows, ui, login)?;
 
-    // 6. Prompt dialog (e.g. an audit review) — drawn on top of everything.
-    if let Some(prompt) = prompt {
-        draw_prompt(stdout, cols, rows, prompt)?;
-    }
-
     stdout.flush()?;
-    Ok(())
-}
-
-/// Draw a pending prompt (e.g. an audit review) as a centered dialog.
-fn draw_prompt(
-    stdout: &mut io::Stdout,
-    cols: usize,
-    rows: usize,
-    prompt: &crate::types::PromptData,
-) -> io::Result<()> {
-    let p = &prompt.prompt;
-    let title = if p.prompt.is_empty() {
-        "PROMPT".to_string()
-    } else {
-        p.prompt.clone()
-    };
-    let yes = if p.yes_dialog.is_empty() { "Approve".to_string() } else { p.yes_dialog.clone() };
-    let no = if p.no_dialog.is_empty() { "Reject".to_string() } else { p.no_dialog.clone() };
-    let secs = prompt
-        .deadline
-        .saturating_duration_since(std::time::Instant::now())
-        .as_secs();
-
-    let mut lines: Vec<String> = Vec::new();
-    if !p.details.is_empty() {
-        lines.push(p.details.clone());
-    }
-    if !p.instructions.is_empty() {
-        lines.push(String::new());
-        for l in p.instructions.lines() {
-            lines.push(l.to_string());
-        }
-    }
-    lines.push(String::new());
-    if p.kind() == cockatiel_client::PromptKind::Boolean {
-        lines.push(format!(" {} (y) / {} (n)", yes, no));
-    } else {
-        let label = if p.input_label.is_empty() {
-            "Input".to_string()
-        } else {
-            p.input_label.clone()
-        };
-        let shown = if p.kind() == cockatiel_client::PromptKind::Credential {
-            "•".repeat(prompt.text_input.chars().count())
-        } else {
-            prompt.text_input.clone()
-        };
-        lines.push(format!(" {}: {}", label, shown));
-        lines.push(String::new());
-        lines.push(" enter: submit   esc: cancel".to_string());
-    }
-    lines.push(format!(" seconds remaining: {}", secs));
-
-    let width = lines
-        .iter()
-        .map(|l| l.chars().count() + 4)
-        .max()
-        .unwrap_or(30)
-        .min(cols.saturating_sub(2))
-        .max(20) as u16;
-    let height = (lines.len() as u16 + 2).min(rows.saturating_sub(2).max(6) as u16);
-    let start_x = (cols as u16).saturating_sub(width) / 2;
-    let start_y = (rows as u16).saturating_sub(height) / 2;
-
-    // Dim + border box
-    for _ in start_y..start_y + height {
-        for _ in start_x..start_x + width {
-            print!("\x1b[48;5;0m ");
-        }
-        print!("\x1b[0m\r\n");
-    }
-    stdout.execute(cursor::MoveTo(start_x, start_y))?;
-    print!("\x1b[43m\x1b[30m {} \x1b[0m", title);
-    stdout.execute(cursor::MoveTo(start_x, start_y + height - 1))?;
-    print!("\x1b[43m\x1b[30m{}\x1b[0m", " ".repeat(width as usize));
-
-    let inner_y = start_y + 1;
-    for (i, line) in lines.iter().enumerate() {
-        if i as u16 >= height.saturating_sub(2) {
-            break;
-        }
-        stdout.execute(cursor::MoveTo(start_x + 1, inner_y + i as u16))?;
-        let max_w = width.saturating_sub(2) as usize;
-        let mut chars: Vec<char> = line.chars().collect();
-        if chars.len() > max_w {
-            chars.truncate(max_w.saturating_sub(1));
-            chars.push('…');
-        }
-        print!("\x1b[37m{}\x1b[0m", chars.into_iter().collect::<String>());
-    }
     Ok(())
 }
 

@@ -98,22 +98,6 @@ impl EngineHandle {
         }
     }
 
-    /// Answer a prompt (e.g. an audit review) broadcast by the engine. `reason`
-/// carries free-text input for `input_label` prompts.
-    pub async fn send_prompt_response(
-        &self,
-        prompt_id: &str,
-        accepted: bool,
-        reason: &str,
-    ) -> Result<(), String> {
-        self.send_payload(Payload::PromptResponse(PromptResponse {
-            prompt_id_uuid7: prompt_id.to_string(),
-            accepted,
-            reason: reason.to_string(),
-        }))
-        .await
-    }
-
     /// Acknowledge receipt of a pipeline message so the engine can advance the
     /// message chain without waiting for the ack timeout.
     pub async fn ack_message(&self, message_uuid7: &str) -> Result<(), String> {

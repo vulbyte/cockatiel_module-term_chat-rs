@@ -51,11 +51,3 @@ pub enum UiMode {
     KickHandle,
     TimeoutPrompt,
 }
-
-/// An unanswered prompt (e.g. an audit review) broadcast by the engine.
-pub struct PromptData {
-    pub prompt: cockatiel_client::proto::Prompt,
-    pub deadline: std::time::Instant,
-    /// Typed text for free-text prompts (`prompt.input_label` is non-empty).
-    pub text_input: String,
-}
