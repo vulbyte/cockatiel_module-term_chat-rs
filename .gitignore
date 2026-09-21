@@ -193,3 +193,15 @@ target/
 *.tmp
 *.bak
 
+# ==========================================
+# Cockatiel runtime (local, per-machine)
+# ==========================================
+# Operator login state contains OAuth tokens — never commit.
+login.json
+# App config may contain OAuth client secrets.
+chat_config.json
+
+
+# Runtime connection config — contains the engine PIN. Never commit.
+config.json
+term-chat-rs.json

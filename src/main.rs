@@ -1,134 +1,402 @@
+mod audio;
+mod config;
+mod easing;
+mod emoji;
+mod engine;
+mod fade;
+mod images;
+mod login;
+mod render;
+mod types;
+
+use std::collections::HashMap;
+use std::io;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
 use crossterm::{
-    cursor,
-    terminal::{self, ClearType},
+    event::{KeyCode, KeyEvent},
+    terminal,
     ExecutableCommand,
 };
-
-use lib_cockatiel::{container::Payload, CockatielClient};
-use std::io::{self, Write};
-use std::sync::Arc;
-use tokio::sync::mpsc;
-use tokio::sync::Mutex;
-use tracing::{error, Level};
+use tokio::sync::{mpsc, Mutex};
+use tracing::{warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
-#[derive(Clone, Debug)]
-struct ChatMessageItem {
-    username: String,
-    platform: String,
-    role_letter: Option<String>,
-    content: String,
+use cockatiel_client::proto::container::Payload;
+use cockatiel_client::PromptKind;
+use futures_util::StreamExt;
+use prost::Message as ProstMessage;
+use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
+
+use config::ChatConfig;
+use easing::EasingQueue;
+use engine::EngineHandle;
+use fade::{fade_action, FadeAction, FadeMode};
+use images::ImageRenderer;
+use login::LoginState;
+use render::Ui;
+use types::{AppStatus, ChatMessageItem, UiMode};
+
+fn build_message_item(
+    payload: &Payload,
+    emoji_map: &HashMap<String, String>,
+    emoji_enabled: bool,
+) -> Option<ChatMessageItem> {
+    let (platform, content, username, name_color, rank, score, role_badges, user_handle, user_uuid7) =
+        match payload {
+            Payload::MessagePostProcess(pp) => {
+                let raw = pp.raw_message.as_ref();
+                let user_data = raw.and_then(|cm| cm.user_data.as_ref());
+                let username = user_data
+                    .map(|ud| ud.username.clone())
+                    .filter(|u| !u.is_empty())
+                    .or_else(|| raw.map(|cm| cm.user_uuid7.clone()))
+                    .unwrap_or_default();
+                let styling = user_data.and_then(|ud| ud.styling.as_ref());
+                let name_color = styling
+                    .and_then(|st| st.css_properties.get("color"))
+                    .cloned()
+                    .unwrap_or_default();
+                let rank = styling
+                    .and_then(|st| st.css_properties.get("rank"))
+                    .cloned()
+                    .unwrap_or_default();
+                let score = styling
+                    .and_then(|st| st.css_properties.get("score"))
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .unwrap_or(0);
+                let role_badges = user_data.map(role_badges_of).unwrap_or_default();
+                let content = if !pp.processed_message.is_empty() {
+                    pp.processed_message.clone()
+                } else {
+                    raw.map(|cm| cm.raw_message.clone()).unwrap_or_default()
+                };
+                (
+                    raw.map(|cm| cm.platform.clone()).unwrap_or_default(),
+                    content,
+                    username,
+                    name_color,
+                    rank,
+                    score,
+                    role_badges,
+                    raw.map(|cm| cm.user_uuid7.clone()).unwrap_or_default(),
+                    raw.map(|cm| cm.user_uuid7.clone()).unwrap_or_default(),
+                )
+            }
+            Payload::MessagePreProcess(pre) => {
+                let raw = pre.raw_message.as_ref();
+                let user_data = raw.and_then(|cm| cm.user_data.as_ref());
+                let username = user_data
+                    .map(|ud| ud.username.clone())
+                    .filter(|u| !u.is_empty())
+                    .or_else(|| raw.map(|cm| cm.user_uuid7.clone()))
+                    .unwrap_or_default();
+                let styling = user_data.and_then(|ud| ud.styling.as_ref());
+                let name_color = styling
+                    .and_then(|st| st.css_properties.get("color"))
+                    .cloned()
+                    .unwrap_or_default();
+                let rank = styling
+                    .and_then(|st| st.css_properties.get("rank"))
+                    .cloned()
+                    .unwrap_or_default();
+                let score = styling
+                    .and_then(|st| st.css_properties.get("score"))
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .unwrap_or(0);
+                let role_badges = user_data.map(role_badges_of).unwrap_or_default();
+                let content = raw.map(|cm| cm.raw_message.clone()).unwrap_or_default();
+                (
+                    raw.map(|cm| cm.platform.clone()).unwrap_or_default(),
+                    content,
+                    username,
+                    name_color,
+                    rank,
+                    score,
+                    role_badges,
+                    raw.map(|cm| cm.user_uuid7.clone()).unwrap_or_default(),
+                    raw.map(|cm| cm.user_uuid7.clone()).unwrap_or_default(),
+                )
+            }
+            _ => return None,
+        };
+
+    let content = if emoji_enabled {
+        emoji::apply(emoji_map, &content)
+    } else {
+        content
+    };
+
+    Some(ChatMessageItem {
+        id: uuid::Uuid::now_v7().to_string(),
+        username,
+        name_color,
+        rank,
+        score,
+        role_badges,
+        platform,
+        user_handle,
+        user_uuid7,
+        content,
+        image_art: None,
+        image_status: None,
+        added_at: Instant::now(),
+    })
 }
 
-/// Tracks internal state we want to surface to the user via the status bar.
-#[derive(Clone, Debug)]
-struct AppStatus {
-    connected: bool,
-    detail: String,
-}
-
-impl Default for AppStatus {
-    fn default() -> Self {
-        Self {
-            connected: true,
-            detail: "connected to cockatiel engine".to_string(),
-        }
+fn role_badges_of(ud: &cockatiel_client::proto::UserData) -> String {
+    let mut badges = Vec::new();
+    if ud.is_owner {
+        badges.push("OWNER");
     }
+    if ud.is_admin {
+        badges.push("ADMIN");
+    }
+    if ud.is_moderator {
+        badges.push("MOD");
+    }
+    if ud.is_sponsor {
+        badges.push("SUB");
+    }
+    badges.join(" ")
+}
+
+fn spawn_image_render(
+    config: &ChatConfig,
+    renderer: Arc<ImageRenderer>,
+    messages: Arc<Mutex<Vec<ChatMessageItem>>>,
+    item: ChatMessageItem,
+    image_map: Arc<HashMap<String, String>>,
+) {
+    if config.images_mode != "all" {
+        return;
+    }
+    let urls = images::collect_image_urls(&item.content, &image_map);
+    if urls.is_empty() {
+        return;
+    }
+    let id = item.id.clone();
+    let min_rank = config.image_min_rank.clone();
+
+    tokio::spawn(async move {
+        // Rank gate: only users at or above image_min_rank get embedded images.
+        // The threshold can be a rank name (owner/admin/mod/sponsor/opal/gold/
+        // silver/regular/coal/trash) OR a numeric score (the user's own trust
+        // level, e.g. "20" = only users with score >= 20).
+        if !rank_allows(item.score, &item.rank, &min_rank) {
+            let mut msgs = messages.lock().await;
+            if let Some(m) = msgs.iter_mut().find(|m| m.id == id) {
+                m.image_status = Some("rank too low".to_string());
+            }
+            warn!("[image] not embedding for {}: rank '{}' score {} below '{}'", item.username, item.rank, item.score, min_rank);
+            return;
+        }
+
+        let mut reason = String::new();
+        for url in urls {
+            match renderer.render(&url).await {
+                images::RenderResult::Ok(art) => {
+                    let mut msgs = messages.lock().await;
+                    if let Some(m) = msgs.iter_mut().find(|m| m.id == id) {
+                        m.image_art = Some(art);
+                    }
+                    return;
+                }
+                images::RenderResult::Reason(r) => {
+                    reason = r;
+                }
+            }
+        }
+        // Every URL failed → show the placeholder with a reason.
+        if reason.is_empty() {
+            reason = "could not be converted".to_string();
+        }
+        let mut msgs = messages.lock().await;
+        if let Some(m) = msgs.iter_mut().find(|m| m.id == id) {
+            m.image_status = Some(reason.clone());
+        }
+        warn!("[image] {} not shown: {}", item.username, reason);
+    });
+}
+
+/// Map a rank string to a comparable tier (higher = better).
+fn rank_tier(rank: &str) -> i32 {
+    match rank.to_ascii_lowercase().as_str() {
+        "owner" => 9,
+        "admin" => 8,
+        "mod" | "moderator" => 7,
+        "sponsor" | "sub" => 6,
+        "opal" => 5,
+        "gold" => 4,
+        "silver" => 3,
+        "coal" => 1,
+        "trash" => 0,
+        // "regular" or anything unknown is the baseline.
+        _ => 2,
+    }
+}
+
+/// True when a user (score + rank) is allowed to embed images under `min_rank`,
+/// which may be a rank name or a numeric score threshold.
+fn rank_allows(score: i64, rank: &str, min_rank: &str) -> bool {
+    if let Ok(min_score) = min_rank.trim().parse::<i64>() {
+        return score >= min_score;
+    }
+    rank_tier(rank) >= rank_tier(min_rank)
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Suppress regular tracing output to stdout so it doesn't mess up the TUI
-
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::WARN)
+        .with_ansi(false)
+        .with_writer(std::io::stderr)
         .finish();
-
     tracing::subscriber::set_global_default(subscriber).unwrap();
 
-    // Connect to Cockatiel engine as an output/post-processing consumer
+    let config = ChatConfig::load_or_default();
+    let emoji_map = if config.emoji_enabled {
+        emoji::load_map(&config.emoji_map_path)
+    } else {
+        HashMap::new()
+    };
 
-    let cockatiel = CockatielClient::connect("term-chat-rs")
-        .position("postprocess")
-        .connect()
-        .await?;
+    // Connect to the engine and split the stream so we can both send and receive.
+    let cockatiel = cockatiel_client::CockatielClient::connect("term-chat-rs.json").await?;
+    let (write, read) = cockatiel.stream.split();
+    let engine = EngineHandle::new(
+        cockatiel.auth_token.clone(),
+        cockatiel.config.module_name.clone(),
+        cockatiel.instance_uuid7.clone(),
+        write,
+    );
 
     let messages: Arc<Mutex<Vec<ChatMessageItem>>> = Arc::new(Mutex::new(Vec::new()));
-    let messages_clone = messages.clone();
+    let pending: Arc<Mutex<EasingQueue>> = Arc::new(Mutex::new(EasingQueue::new(
+        config.easing_enabled,
+        config.easing_target_per_min,
+    )));
     let status: Arc<Mutex<AppStatus>> = Arc::new(Mutex::new(AppStatus::default()));
-    let status_clone = status.clone();
+    let prompt: Arc<Mutex<Option<types::PromptData>>> = Arc::new(Mutex::new(None));
+    let renderer = Arc::new(ImageRenderer::new(
+        config.ascii_converter_path.clone(),
+        config.ascii_width,
+        config.image_referer.clone(),
+    ));
+    let image_map: Arc<HashMap<String, String>> =
+        Arc::new(images::load_map(&config.image_map_path));
 
-    // Spawn listener for incoming engine events
-    tokio::spawn(async move {
-        if let Err(err_msg) = cockatiel
-            .receive(move |container| {
-                let msgs_ref = messages_clone.clone();
-
-                if let Some(payload) = &container.payload {
-                    let (platform, content, username) = match payload {
-                        Payload::MessagePostProcess(pp) => (
-                            pp.platform.clone(),
-                            if !pp.processed_message.is_empty() {
-                                pp.processed_message.clone()
-                            } else {
-                                pp.raw_message.clone()
-                            },
-                            if !pp.user_uuid.is_empty() {
-                                pp.user_uuid.clone()
-                            } else {
-                                "UnknownUser".to_string()
-                            },
-                        ),
-                        Payload::MessagePreProcess(pre) => (
-                            pre.platform.clone(),
-                            pre.raw_message.clone(),
-                            "UnknownUser".to_string(),
-                        ),
-                        _ => return, // Ignore other payload types
-                    };
-
-                    let item = ChatMessageItem {
-                        username,
-                        platform,
-                        role_letter: None,
-                        content,
-                    };
-
-                    let runtime = tokio::runtime::Handle::current();
-                    runtime.spawn(async move {
-                        let mut guard = msgs_ref.lock().await;
-                        guard.push(item);
-                        if guard.len() > 100 {
-                            guard.remove(0);
-                        }
-                    });
+    // Read task: engine -> UI.
+    {
+        let pending = Arc::clone(&pending);
+        let status = Arc::clone(&status);
+        let result_tx = engine.result_sender();
+        let emoji_map = emoji_map.clone();
+        let emoji_enabled = config.emoji_enabled;
+        let engine_task = engine.clone();
+        // Audio playback settings (TTS clips).
+        let play_audio = config.play_audio;
+        let audio_volume = config.audio_volume;
+        let max_audio_seconds = config.max_audio_seconds;
+        tokio::spawn(async move {
+            let mut read = read;
+            loop {
+                let Some(msg) = read.next().await else {
+                    let mut status_guard = status.lock().await;
+                    status_guard.connected = false;
+                    status_guard.detail = "disconnected from engine".to_string();
+                    break;
+                };
+                let Ok(WsMessage::Binary(data)) = msg else {
+                    continue;
+                };
+                let Ok(container) = cockatiel_client::proto::Container::decode(data.as_ref()) else {
+                    continue;
+                };
+                let Some(payload) = container.payload else {
+                    continue;
+                };
+                // Answer the engine's liveness probe with our auth token.
+                if let Payload::AuthVerify(_) = &payload {
+                    let _ = engine_task
+                        .send_payload(Payload::AuthVerify(cockatiel_client::proto::AuthVerify {
+                            cur_auth: engine_task.auth_token.clone(),
+                        }))
+                        .await;
+                    continue;
                 }
-            })
-            .await
-            // Turn the error into an owned String immediately, synchronously,
-            // right here. This is what actually keeps the non-Send
-            // Box<dyn Error> from ever being part of the state this future
-            // has to carry across the status-mutex await below -- calling
-            // drop() on it further down isn't reliably enough for every
-            // rustc/tokio version to prove that on its own.
-            .map_err(|e| e.to_string())
-        {
-            error!("Terminal display receiver error: {}", err_msg);
+                // Acknowledge pipeline messages so the engine advances the chain
+                // immediately instead of waiting out the ack timeout.
+                let ack_uuid: Option<String> = match &payload {
+                    Payload::MessagePreProcess(m) => {
+                        if m.message_uuid7.is_empty() { None } else { Some(m.message_uuid7.clone()) }
+                    }
+                    Payload::MessageInProcess(m) => {
+                        if m.message_uuid7.is_empty() { None } else { Some(m.message_uuid7.clone()) }
+                    }
+                    Payload::MessagePostProcess(m) => {
+                        if m.message_uuid7.is_empty() { None } else { Some(m.message_uuid7.clone()) }
+                    }
+                    _ => None,
+                };
+                if let Some(u) = ack_uuid {
+                    let _ = engine_task.ack_message(&u).await;
+                }
 
-            let mut status_guard = status_clone.lock().await;
-            status_guard.connected = false;
-            status_guard.detail = format!("disconnected from engine: {}", err_msg);
-        }
-    });
+                match payload {
+                    Payload::DatabaseQueryResult(qr) => {
+                        let _ = result_tx.send(qr);
+                    }
+                    // term-chat is a display-only module, NOT an interactive
+                    // surface. Engine/module prompts are deliberately ignored
+                    // here so they never interrupt the chat stream — the TUI is
+                    // the interface that answers them.
+                    Payload::Prompt(_) => {}
+                    other => {
+                        if let Some(item) = build_message_item(&other, &emoji_map, emoji_enabled) {
+                            let mut pending_guard = pending.lock().await;
+                            pending_guard.push(item);
+                        }
+                        // Audio playback (TTS clips): audio created by a
+                        // pre/in-process module rides WITH the message; audio
+                        // created at the post-process stage is saved to the
+                        // timeline and fetched here.
+                        if play_audio {
+                            if let Payload::MessagePostProcess(pp) = &other {
+                                if !pp.audio.is_empty() {
+                                    audio::play_audio(pp.audio.clone(), audio_volume, max_audio_seconds);
+                                } else if !pp.message_uuid7.is_empty() {
+                                    let eng = engine_task.clone();
+                                    let uuid = pp.message_uuid7.clone();
+                                    tokio::spawn(async move {
+                                        audio::fetch_and_play(&eng, &uuid, audio_volume, max_audio_seconds).await;
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
 
-    // Enter alternate screen and setup terminal interface
-
+    // Enter alternate screen and setup terminal interface.
     let mut stdout = io::stdout();
     stdout.execute(terminal::EnterAlternateScreen)?;
     terminal::enable_raw_mode()?;
-    let result = run_tui(&mut stdout, messages, status).await;
-
-    // Restore terminal state on exit
+    let result = run_tui(
+        &mut stdout,
+        messages,
+        pending,
+        status,
+        prompt,
+        &engine,
+        &config,
+        renderer,
+        image_map,
+    )
+    .await;
 
     terminal::disable_raw_mode()?;
     stdout.execute(terminal::LeaveAlternateScreen)?;
@@ -139,42 +407,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// A message resolved to what will actually be printed for it: the bit
-/// inside the brackets, and the (possibly truncated) content.
-struct RenderedLine {
-    bracket_content: String,
-    content: String,
-}
-
+/// Returns true when the app should quit.
+#[allow(clippy::too_many_arguments)]
 async fn run_tui(
     stdout: &mut io::Stdout,
     messages: Arc<Mutex<Vec<ChatMessageItem>>>,
+    pending: Arc<Mutex<EasingQueue>>,
     status: Arc<Mutex<AppStatus>>,
+    prompt: Arc<Mutex<Option<types::PromptData>>>,
+    engine: &EngineHandle,
+    config: &ChatConfig,
+    renderer: Arc<ImageRenderer>,
+    image_map: Arc<HashMap<String, String>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // crossterm::event::read() blocks the OS thread until an event arrives,
-    // so it's given its own dedicated blocking thread and forwards what it
-    // reads back to this async loop over a channel. That's what lets a
-    // terminal resize (or keypress) be reacted to the instant it happens,
-    // instead of the old approach of only checking for one event every time
-    // a 100ms tick fired.
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<crossterm::event::Event>();
 
-    tokio::task::spawn_blocking(move || loop {
-        match crossterm::event::read() {
-            Ok(ev) => {
-                if event_tx.send(ev).is_err() {
-                    break; // Receiving end dropped, TUI is shutting down
-                }
+    tokio::task::spawn_blocking(move || {
+        while let Ok(ev) = crossterm::event::read() {
+            if event_tx.send(ev).is_err() {
+                break;
             }
-            Err(_) => break,
         }
     });
 
-    // Interval is now just a "redraw at least this often" fallback, e.g. to
-    // pick up newly arrived chat messages even if the terminal itself is
-    // untouched. Resize/key events short-circuit this via `select!` below.
-    let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(250));
-    let mut needs_redraw = true; // Draw once immediately on startup
+    let mut ui = Ui::new();
+    let mut login = login::load_or_empty();
+
+    let mut interval = tokio::time::interval(Duration::from_millis(250));
+    #[allow(unused_assignments)]
+    let mut needs_redraw = true;
     loop {
         tokio::select! {
             _ = interval.tick() => {
@@ -182,178 +443,413 @@ async fn run_tui(
             }
             maybe_event = event_rx.recv() => {
                 match maybe_event {
-                    Some(crossterm::event::Event::Key(key)) => {
-                        if key.code == crossterm::event::KeyCode::Char('c')
-                            && key
-                                .modifiers
-                                .contains(crossterm::event::KeyModifiers::CONTROL)
-                        {
+                    Some(ev) => {
+                        if handle_event(ev, &mut ui, &mut login, &prompt, engine, config, &messages).await? {
                             break;
                         }
-
-                        if key.code == crossterm::event::KeyCode::Char('q') {
-                            break;
-                        }
-                    }
-                    Some(crossterm::event::Event::Resize(_, _)) => {
-                        // Terminal dimensions changed -- recalculate and
-                        // redraw right away using the new size below.
                         needs_redraw = true;
                     }
-                    Some(_) => {} // Ignore mouse/focus/paste events
-                    None => break, // Input thread ended unexpectedly
+                    None => break,
                 }
             }
         }
 
-        if !needs_redraw {
-            continue;
-        }
-
-        needs_redraw = false;
-        let (cols, rows) = terminal::size()?;
-        if cols < 10 || rows < 6 {
-            continue;
-        }
-
-        let cols_usize = cols as usize;
-        // Redraw screen
-        stdout.execute(cursor::MoveTo(0, 0))?;
-        stdout.execute(terminal::Clear(ClearType::All))?;
-        // 1. Top of the window: Header
-        let header = " Cockatiel Term Chat Display ";
-        let padded_header = format!("{:^width$}", header, width = cols_usize);
-        print!("\x1b[44m\x1b[37m{}\x1b[0m\r\n", padded_header);
-        // 2. Middle: Chat messages area
-        //
-        // Reserved rows: Header (1) + Status bar (1) + Footer (1).
-        // Everything else is available for messages.
-
-        let current_msgs = messages.lock().await;
-        let max_chat_rows = (rows as usize).saturating_sub(3);
-
-        // Walk backwards from the newest message, working out how many
-        // terminal rows each one will actually take (long messages wrap,
-        // and we now add a blank spacer row after every message), and stop
-        // as soon as the budget is used up. Without this, a run of long or
-        // numerous messages could print more lines than the screen has
-        // room for, which is what let the header scroll off the top over
-        // time.
-        let mut selected: Vec<RenderedLine> = Vec::new();
-        let mut used_rows = 0usize;
-        for msg in current_msgs.iter().rev() {
-            let pl_code: String = if msg.platform.chars().count() > 2 {
-                msg.platform.chars().take(2).collect() // ie: discord -> di
-            } else {
-                msg.platform.clone()
-            };
-
-            let bracket_content = if let Some(role) = &msg.role_letter {
-                format!("{} | {} | {}", msg.username, pl_code, role)
-            } else {
-                format!("{} | {}", msg.username, pl_code)
-            };
-
-            // Now rendered as two lines: "[user | platform | perm]:" on its
-            // own line, then the message content below it.
-            let bracket_line = format!("[{}]:", bracket_content);
-            let bracket_rows = (bracket_line.chars().count().max(1) + cols_usize - 1) / cols_usize;
-            let content_rows = (msg.content.chars().count().max(1) + cols_usize - 1) / cols_usize;
-            let rows_needed = bracket_rows + content_rows + 1; // +1 for the spacer line after it
-            if used_rows + rows_needed > max_chat_rows {
-                // This message doesn't fit in what's left of the budget.
-                // If nothing has been selected yet, it means even the
-                // single newest message is taller than the whole message
-                // area on its own -- truncate it so it still fits, rather
-                // than letting it push everything else off-screen.
-                if selected.is_empty() && max_chat_rows > 1 {
-                    // Rows available for the content line(s), after
-                    // reserving rows for the bracket line and the spacer
-                    // beneath it.
-                    let content_area_rows = (max_chat_rows - 1).saturating_sub(bracket_rows).max(1);
-                    let max_visible_chars = cols_usize.saturating_mul(content_area_rows).max(1);
-
-                    let truncated_content: String = msg
-                        .content
-                        .chars()
-                        .take(max_visible_chars.saturating_sub(1))
-                        .collect();
-
-                    selected.push(RenderedLine {
-                        bracket_content: bracket_content.clone(),
-                        content: format!("{}…", truncated_content),
-                    });
+        // Auto-deny a prompt the user never answered.
+        {
+            let mut prompt_guard = prompt.lock().await;
+            if let Some(p) = prompt_guard.as_ref() {
+                if Instant::now() >= p.deadline {
+                    let id = p.prompt.prompt_id_uuid7.clone();
+                    let _ = engine.send_prompt_response(&id, false, "").await;
+                    *prompt_guard = None;
+                    needs_redraw = true;
                 }
-
-                break;
             }
+        }
 
-            used_rows += rows_needed;
+        // Drain the easing queue into the display buffer (scroll-freeze aware).
+        let now = Instant::now();
+        let drained = pending.lock().await.poll(now);
+        if !drained.is_empty() {
+            let added = drained.len();
+            let mut msgs = messages.lock().await;
+            for mut item in drained {
+                spawn_image_render(config, Arc::clone(&renderer), Arc::clone(&messages), item.clone(), Arc::clone(&image_map));
+                // The fade clock starts when the message becomes visible.
+                item.added_at = now;
+                msgs.push(item);
+            }
+            while msgs.len() > config.max_buffered {
+                msgs.remove(0);
+            }
+            drop(msgs);
+            if ui.scroll > 0 {
+                ui.scroll += added;
+            }
+            needs_redraw = true;
+        }
 
-            selected.push(RenderedLine {
-                bracket_content,
-                content: msg.content.clone(),
+        // Fade old messages out of the display buffer on a timer, even when no
+        // new messages arrive.
+        if config.message_fade_secs > 0 {
+            let mode = FadeMode::parse(&config.message_fade_mode);
+            let fade_now = Instant::now();
+            let mut msgs = messages.lock().await;
+            let before = msgs.len();
+            msgs.retain(|m| {
+                let age = fade_now.saturating_duration_since(m.added_at);
+                fade_action(age, config.message_fade_secs, mode) != FadeAction::Remove
             });
+            if msgs.len() != before {
+                ui.scroll = ui.scroll.min(msgs.len());
+                needs_redraw = true;
+            }
         }
 
-        selected.reverse(); // Back to chronological order (oldest visible first)
-
-        let color_code = "\x1b[35m";
-        for line in &selected {
-            print!(
-                "{}[{}]:\x1b[0m\r\n\x1b[37m{}\x1b[0m\r\n\r\n",
-                color_code, line.bracket_content, line.content
-            );
+        if std::mem::take(&mut needs_redraw) {
+            let (cols, rows) = terminal::size()?;
+            if cols < 10 || rows < 6 {
+                continue;
+            }
+            let msgs = messages.lock().await;
+            let status_guard = status.lock().await;
+            let prompt_guard = prompt.lock().await;
+            render::draw(
+                stdout,
+                cols as usize,
+                rows as usize,
+                &msgs,
+                &ui,
+                &status_guard,
+                config,
+                Some(&login),
+                prompt_guard.as_ref(),
+            )?;
         }
-
-        // 3. Status bar: internal state, one row above the footer
-        //
-        // Built as: a leading space, a colored connection dot, then the
-        // rest of the text -- all on a shared gray background that's set
-        // once and only reset (\x1b[0m) at the very end, so switching the
-        // foreground color for the dot doesn't disturb it.
-        let status_guard = status.lock().await;
-        let dot_color = if status_guard.connected {
-            "\x1b[32m" // green
-        } else {
-            "\x1b[31m" // red
-        };
-
-        let rest_text = format!(
-            " {} | {} messages buffered | {}x{} ",
-            status_guard.detail,
-            current_msgs.len(),
-            cols,
-            rows
-        );
-
-        drop(status_guard);
-        drop(current_msgs);
-
-        // Reserve 2 visible columns for the leading space + dot, fit/pad the rest into what's left.
-        let avail_for_rest = cols_usize.saturating_sub(2);
-        let mut rest_chars: Vec<char> = rest_text.chars().collect();
-        if rest_chars.len() > avail_for_rest {
-            rest_chars.truncate(avail_for_rest);
-        } else {
-            rest_chars.resize(avail_for_rest, ' ');
-        }
-
-        let rest_str: String = rest_chars.into_iter().collect();
-        stdout.execute(cursor::MoveTo(0, rows.saturating_sub(2)))?;
-        print!(
-            "\x1b[100m\x1b[37m {}●\x1b[37m{}\x1b[0m",
-            dot_color, rest_str
-        );
-
-        // 4. Bottom of the window: Footer in dark terminal safe gray (\x1b[90m)
-
-        stdout.execute(cursor::MoveTo(0, rows.saturating_sub(1)))?;
-        let footer = " press ctrl+c to exit ";
-        let padded_footer = format!("{:^width$}", footer, width = cols_usize);
-        print!("\x1b[90m{}\x1b[0m", padded_footer);
-        stdout.flush()?;
     }
 
     Ok(())
+}
+
+/// Returns true when the app should quit.
+#[allow(clippy::too_many_arguments)]
+async fn handle_event(
+    ev: crossterm::event::Event,
+    ui: &mut Ui,
+    login: &mut LoginState,
+    prompt: &Arc<Mutex<Option<types::PromptData>>>,
+    engine: &EngineHandle,
+    config: &ChatConfig,
+    messages: &Arc<Mutex<Vec<ChatMessageItem>>>,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    match ev {
+        crossterm::event::Event::Key(key) => {
+            handle_key(key, ui, login, prompt, engine, config, messages).await?;
+            Ok(false)
+        }
+        crossterm::event::Event::Mouse(m) => {
+            match m.kind {
+                crossterm::event::MouseEventKind::ScrollUp => {
+                    let len = messages.lock().await.len();
+                    ui.scroll = (ui.scroll + 3).min(len);
+                }
+                crossterm::event::MouseEventKind::ScrollDown => {
+                    ui.scroll = ui.scroll.saturating_sub(3);
+                }
+                _ => {}
+            }
+            Ok(false)
+        }
+        _ => Ok(false),
+    }
+}
+
+async fn handle_key(
+    key: KeyEvent,
+    ui: &mut Ui,
+    login: &mut LoginState,
+    prompt: &Arc<Mutex<Option<types::PromptData>>>,
+    engine: &EngineHandle,
+    config: &ChatConfig,
+    messages: &Arc<Mutex<Vec<ChatMessageItem>>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let KeyEvent { code, .. } = key;
+
+    // Global quit.
+    // Ctrl+C is deliberately NOT intercepted to quit — in a terminal it is the
+    // copy shortcut, so quitting on it breaks copy/paste. Use `q` instead.
+
+    // If a prompt (e.g. an audit review) is awaiting an answer, act on it. A
+    // boolean prompt answers y/n; string/credential prompts accept typing +
+    // Enter (credentials are masked on display).
+    {
+        let mut prompt_guard = prompt.lock().await;
+        if let Some(p) = prompt_guard.as_mut() {
+            let id = p.prompt.prompt_id_uuid7.clone();
+            if p.prompt.kind() != PromptKind::Boolean {
+                match code {
+                    KeyCode::Char(c) => p.text_input.push(c),
+                    KeyCode::Backspace => {
+                        p.text_input.pop();
+                    }
+                    KeyCode::Enter => {
+                        let text = p.text_input.clone();
+                        let _ = engine.send_prompt_response(&id, true, &text).await;
+                        *prompt_guard = None;
+                    }
+                    KeyCode::Esc => {
+                        let _ = engine.send_prompt_response(&id, false, "").await;
+                        *prompt_guard = None;
+                    }
+                    _ => {}
+                }
+                return Ok(());
+            }
+            let accepted = match code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => Some(true),
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Some(false),
+                _ => None,
+            };
+            if let Some(accepted) = accepted {
+                let _ = engine.send_prompt_response(&id, accepted, "").await;
+                *prompt_guard = None;
+            }
+            return Ok(());
+        }
+    }
+
+    match ui.mode {
+        UiMode::Chat => match code {
+            KeyCode::Char('q') => std::process::exit(0),
+            KeyCode::Char('l') => {
+                ui.mode = UiMode::LoginMenu;
+                ui.login_note.clear();
+            }
+            KeyCode::Char('i') => {
+                if login.can_send() {
+                    ui.mode = UiMode::Input;
+                    ui.draft.clear();
+                } else {
+                    ui.result_note = "not allowed to send — log in with mod perms".to_string();
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                let len = messages.lock().await.len();
+                ui.scroll = (ui.scroll + 1).min(len);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                ui.scroll = ui.scroll.saturating_sub(1);
+            }
+            KeyCode::Enter
+                if login.can_moderate() => {
+                    let len = messages.lock().await.len();
+                    let idx = len.saturating_sub(ui.scroll + 1);
+                    if idx < len {
+                        let msgs = messages.lock().await;
+                        let item = &msgs[idx];
+                        ui.action_target = Some((
+                            item.username.clone(),
+                            item.user_handle.clone(),
+                            item.platform.clone(),
+                            item.user_uuid7.clone(),
+                        ));
+                        ui.result_note.clear();
+                        ui.mode = UiMode::ActionMenu;
+                    }
+                }
+            _ => {}
+        },
+        UiMode::LoginMenu => match code {
+            KeyCode::Char('1') => {
+                do_login(engine, ui, login, "twitch", "", config).await;
+                ui.mode = UiMode::Chat;
+            }
+            KeyCode::Char('2') => {
+                ui.mode = UiMode::KickHandle;
+                ui.kick_handle_draft.clear();
+                ui.login_note.clear();
+            }
+            KeyCode::Char('3') => {
+                do_login(engine, ui, login, "youtube", "", config).await;
+                ui.mode = UiMode::Chat;
+            }
+            KeyCode::Char('4') | KeyCode::Esc => {
+                ui.mode = UiMode::Chat;
+            }
+            _ => {}
+        },
+        UiMode::KickHandle => match code {
+            KeyCode::Char(c) => {
+                ui.kick_handle_draft.push(c);
+            }
+            KeyCode::Backspace => {
+                ui.kick_handle_draft.pop();
+            }
+            KeyCode::Enter => {
+                let handle = ui.kick_handle_draft.trim().to_string();
+                if handle.is_empty() {
+                    ui.login_note = "enter your kick username".to_string();
+                } else {
+                    do_login(engine, ui, login, "kick", &handle, config).await;
+                    ui.mode = UiMode::Chat;
+                }
+            }
+            KeyCode::Esc => {
+                ui.mode = UiMode::LoginMenu;
+            }
+            _ => {}
+        },
+        UiMode::ActionMenu => match code {
+            KeyCode::Char('1') => {
+                send_mod_action(engine, ui, login, "mod_ban", None).await;
+                ui.mode = UiMode::Chat;
+            }
+            KeyCode::Char('2') => {
+                ui.mode = UiMode::TimeoutPrompt;
+                ui.timeout_draft.clear();
+            }
+            KeyCode::Char('3') => {
+                send_mod_action(engine, ui, login, "mod_commend", None).await;
+                ui.mode = UiMode::Chat;
+            }
+            KeyCode::Char('4') => {
+                send_mod_action(engine, ui, login, "mod_reprimand", None).await;
+                ui.mode = UiMode::Chat;
+            }
+            KeyCode::Esc => {
+                ui.mode = UiMode::Chat;
+                ui.action_target = None;
+            }
+            _ => {}
+        },
+        UiMode::TimeoutPrompt => match code {
+            KeyCode::Char(c) => {
+                if c.is_ascii_digit() {
+                    ui.timeout_draft.push(c);
+                }
+            }
+            KeyCode::Backspace => {
+                ui.timeout_draft.pop();
+            }
+            KeyCode::Enter => {
+                let secs: i64 = ui.timeout_draft.parse().unwrap_or(300);
+                send_mod_action(engine, ui, login, "mod_timeout", Some(secs)).await;
+                ui.mode = UiMode::Chat;
+            }
+            KeyCode::Esc => {
+                ui.mode = UiMode::ActionMenu;
+            }
+            _ => {}
+        },
+        UiMode::Input => match code {
+            KeyCode::Char(c) => {
+                ui.draft.push(c);
+            }
+            KeyCode::Backspace => {
+                ui.draft.pop();
+            }
+            KeyCode::Tab => {
+                let next = match ui.target_platform.as_str() {
+                    "twitch" => "kick",
+                    "kick" => "youtube",
+                    "youtube" => "discord",
+                    "discord" => "all",
+                    _ => "twitch",
+                };
+                ui.target_platform = next.to_string();
+            }
+            KeyCode::Enter => {
+                let text = ui.draft.trim().to_string();
+                if !text.is_empty() && login.can_send() {
+                    let actor = (login.platform.as_str(), login.handle.as_str());
+                    match engine.send_message(&ui.target_platform, &text, Some(actor)).await {
+                        Ok(()) => ui.result_note = "sent".to_string(),
+                        Err(e) => ui.result_note = format!("send failed: {}", e),
+                    }
+                }
+                ui.draft.clear();
+                ui.mode = UiMode::Chat;
+            }
+            KeyCode::Esc => {
+                ui.draft.clear();
+                ui.mode = UiMode::Chat;
+            }
+            _ => {}
+        },
+    }
+    Ok(())
+}
+
+async fn do_login(
+    engine: &EngineHandle,
+    ui: &mut Ui,
+    login: &mut LoginState,
+    platform: &str,
+    kick_handle: &str,
+    config: &ChatConfig,
+) {
+    ui.login_note.clear();
+    ui.result_note.clear();
+
+    // For Twitch we need the monitored channel to verify the operator is the
+    // owner / a moderator of it.
+    let channel = if platform == "twitch" {
+        engine
+            .adapter_credentials("twitch-adapter")
+            .await
+            .map(|m| m.get("channel").cloned().unwrap_or_default())
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    match login::login_and_verify(engine, platform, &channel, kick_handle, config).await {
+        Ok(state) => {
+            *login = state;
+            ui.login_note = format!(
+                "logged in as {} {} — {}",
+                login.platform,
+                login.handle,
+                login.effective.label()
+            );
+        }
+        Err(e) => {
+            ui.login_note = e;
+        }
+    }
+}
+
+async fn send_mod_action(
+    engine: &EngineHandle,
+    ui: &mut Ui,
+    login: &LoginState,
+    query_id: &str,
+    duration_secs: Option<i64>,
+) {
+    let Some((_username, handle, platform, uuid7)) = ui.action_target.clone() else {
+        return;
+    };
+    let mut target = serde_json::json!({
+        "platform": platform,
+        "handle": handle,
+    });
+    let looks_like_uuid = uuid7.len() == 36 && uuid7.chars().filter(|c| *c == '-').count() == 4;
+    if looks_like_uuid {
+        target["uuid7"] = serde_json::json!(uuid7);
+    }
+    if let Some(secs) = duration_secs {
+        target["duration_secs"] = serde_json::json!(secs);
+    }
+
+    match engine.mod_action(query_id, &target, login).await {
+        Ok(resp) if resp.success => {
+            ui.result_note = format!("{} applied", query_id);
+        }
+        Ok(resp) => {
+            ui.result_note = format!("{} failed: {}", query_id, resp.error);
+        }
+        Err(e) => {
+            ui.result_note = format!("{} error: {}", query_id, e);
+        }
+    }
 }

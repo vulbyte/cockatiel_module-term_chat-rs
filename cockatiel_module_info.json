@@ -1,12 +1,35 @@
 {
-    "name": "term-chat", 
-    "description": "a terminal based display for showing the chat. good ",
-    "version": "0.1.0", 
-    "capabilities": "input",    
-    "root_file": "./src/main.rs",
-    "launch_command": "cargo run",
-    "command_flags": [
-        " --release"
-    ],
-    "autostart": true
+  "autostart": true,
+  "binary": {
+    "linux": {
+      "aarch64": "target/release/term_display_rs",
+      "arm": "target/release/term_display_rs",
+      "x86_64": "target/release/term_display_rs"
+    },
+    "macos": {
+      "aarch64": "target/release/term_display_rs",
+      "arm": "target/release/term_display_rs",
+      "x86_64": "target/release/term_display_rs"
+    },
+    "windows": {
+      "aarch64": "target/release/term_display_rs.exe",
+      "arm": "target/release/term_display_rs.exe",
+      "x86_64": "target/release/term_display_rs.exe"
+    }
+  },
+  "build_command": "cargo",
+  "build_flags": [
+    "build",
+    "--release"
+  ],
+  "capabilities": "output",
+  "command_flags": [
+    "--release"
+  ],
+  "description": "terminal chat display with mod tools (login via platform to unlock send/mod actions)",
+  "launch_command": "cargo run",
+  "name": "term-chat",
+  "root_file": "./src/main.rs",
+  "terminal": true,
+  "version": "0.2.0"
 }
