@@ -42,6 +42,11 @@ pub struct ChatConfig {
     // YouTube OAuth (optional; needed for the Google login flow)
     pub google_oauth_client_id: String,
     pub google_oauth_client_secret: String,
+    /// Loopback port for the OAuth redirect listener. Give each module a
+    /// distinct port and register the matching redirect URI in the platform
+    /// console. Default 3000 (backwards compatible).
+    #[serde(default = "default_oauth_redirect_port")]
+    pub oauth_redirect_port: u16,
     // Audio playback (TTS clips)
     /// Whether the chat display plays rendered audio at all.
     #[serde(default = "default_play_audio")]
@@ -80,6 +85,10 @@ fn default_message_fade_mode() -> String {
     "remove".to_string()
 }
 
+fn default_oauth_redirect_port() -> u16 {
+    3000
+}
+
 impl Default for ChatConfig {
     fn default() -> Self {
         Self {
@@ -102,6 +111,7 @@ impl Default for ChatConfig {
             max_buffered: 200,
             google_oauth_client_id: String::new(),
             google_oauth_client_secret: String::new(),
+            oauth_redirect_port: 3000,
             play_audio: true,
             max_audio_seconds: 15.0,
             audio_volume: 0.4,
