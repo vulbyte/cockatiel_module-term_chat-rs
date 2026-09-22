@@ -56,7 +56,6 @@ pub struct RenderedLine {
 fn bracket_content(
     msg: &ChatMessageItem,
     config: &ChatConfig,
-    role_letter: Option<&str>,
 ) -> String {
     let mut parts: Vec<String> = Vec::new();
 
@@ -84,11 +83,7 @@ fn bracket_content(
         } else {
             msg.platform.clone()
         };
-        if let Some(letter) = role_letter {
-            parts.push(format!("{} | {}", pl_code, letter));
-        } else {
-            parts.push(pl_code);
-        }
+        parts.push(pl_code);
     }
 
     parts.join(" | ")
@@ -172,7 +167,7 @@ pub fn draw(
             } else {
                 msg.name_color.clone()
             },
-            bracket_content: bracket_content(msg, config, None),
+            bracket_content: bracket_content(msg, config),
             content: msg.content.clone(),
             image_art: msg.image_art.clone(),
             image_status: msg.image_status.clone(),
