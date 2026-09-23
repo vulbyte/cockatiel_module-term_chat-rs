@@ -162,6 +162,7 @@ impl EngineHandle {
             actor_platform: actor_platform.to_string(),
             actor_handle: actor_handle.to_string(),
             actor_uuid7: String::new(),
+            channel_id: String::new(),
         }))
         .await
     }
