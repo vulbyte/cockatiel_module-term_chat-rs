@@ -10,6 +10,9 @@ pub struct ChatMessageItem {
     /// trust-level thresholds (e.g. `image_min_rank` as a number).
     pub score: i64,
     pub role_badges: String,
+    /// True when the user has been reprimanded (reprimands counter > 0);
+    /// drives the compact `R` indicator.
+    pub reprimanded: bool,
     pub platform: String,
     /// Raw identifier the adapter supplied (usually the platform handle).
     pub user_handle: String,

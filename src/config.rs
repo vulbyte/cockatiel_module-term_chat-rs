@@ -67,6 +67,20 @@ pub struct ChatConfig {
     /// for the final ~2s (or ~20% of the lifetime) then drop it.
     #[serde(default = "default_message_fade_mode")]
     pub message_fade_mode: String,
+    // Reprimand indicator + status/rank colors (roadmap Checkpoint 5).
+    /// Show a compact `R` marker on users who have been reprimanded.
+    #[serde(default = "default_true")]
+    pub show_reprimand: bool,
+    /// Color the role badge letters (OWNER/ADMIN/MOD/SUB).
+    #[serde(default = "default_true")]
+    pub show_status_color: bool,
+    /// Color the rank text (e.g. `(opal)`).
+    #[serde(default = "default_true")]
+    pub show_rank_color: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_play_audio() -> bool {
@@ -117,6 +131,9 @@ impl Default for ChatConfig {
             audio_volume: 0.4,
             message_fade_secs: 0,
             message_fade_mode: "remove".to_string(),
+            show_reprimand: true,
+            show_status_color: true,
+            show_rank_color: true,
         }
     }
 }
@@ -137,6 +154,23 @@ impl ChatConfig {
     pub fn load_or_default_from<P: AsRef<Path>>(path: P) -> Self {
         if let Ok(data) = fs::read_to_string(&path) {
             if let Ok(cfg) = serde_json::from_str(&data) {
+                // Config convention: settings are created with their default
+                // when missing — write any absent keys back so every setting
+                // always exists and is editable in place.
+                if let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&data) {
+                    let mut changed = false;
+                    if let Some(obj) = root.as_object_mut() {
+                        for key in ["show_reprimand", "show_status_color", "show_rank_color"] {
+                            if !obj.contains_key(key) {
+                                obj.insert(key.to_string(), serde_json::json!(true));
+                                changed = true;
+                            }
+                        }
+                    }
+                    if changed {
+                        let _ = fs::write(path, serde_json::to_string_pretty(&root).unwrap());
+                    }
+                }
                 return cfg;
             }
         }

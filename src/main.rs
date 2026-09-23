@@ -42,7 +42,7 @@ fn build_message_item(
     emoji_map: &HashMap<String, String>,
     emoji_enabled: bool,
 ) -> Option<ChatMessageItem> {
-    let (platform, content, username, name_color, rank, score, role_badges, user_handle, user_uuid7) =
+    let (platform, content, username, name_color, rank, score, reprimanded, role_badges, user_handle, user_uuid7) =
         match payload {
             Payload::MessagePostProcess(pp) => {
                 let raw = pp.raw_message.as_ref();
@@ -65,6 +65,11 @@ fn build_message_item(
                     .and_then(|st| st.css_properties.get("score"))
                     .and_then(|s| s.parse::<i64>().ok())
                     .unwrap_or(0);
+                let reprimanded = styling
+                    .and_then(|st| st.css_properties.get("reprimands"))
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .map(|n| n > 0)
+                    .unwrap_or(false);
                 let role_badges = user_data.map(role_badges_of).unwrap_or_default();
                 let content = if !pp.processed_message.is_empty() {
                     pp.processed_message.clone()
@@ -78,6 +83,7 @@ fn build_message_item(
                     name_color,
                     rank,
                     score,
+                    reprimanded,
                     role_badges,
                     raw.map(|cm| cm.user_uuid7.clone()).unwrap_or_default(),
                     raw.map(|cm| cm.user_uuid7.clone()).unwrap_or_default(),
@@ -104,6 +110,11 @@ fn build_message_item(
                     .and_then(|st| st.css_properties.get("score"))
                     .and_then(|s| s.parse::<i64>().ok())
                     .unwrap_or(0);
+                let reprimanded = styling
+                    .and_then(|st| st.css_properties.get("reprimands"))
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .map(|n| n > 0)
+                    .unwrap_or(false);
                 let role_badges = user_data.map(role_badges_of).unwrap_or_default();
                 let content = raw.map(|cm| cm.raw_message.clone()).unwrap_or_default();
                 (
@@ -113,6 +124,7 @@ fn build_message_item(
                     name_color,
                     rank,
                     score,
+                    reprimanded,
                     role_badges,
                     raw.map(|cm| cm.user_uuid7.clone()).unwrap_or_default(),
                     raw.map(|cm| cm.user_uuid7.clone()).unwrap_or_default(),
@@ -134,6 +146,7 @@ fn build_message_item(
         rank,
         score,
         role_badges,
+        reprimanded,
         platform,
         user_handle,
         user_uuid7,

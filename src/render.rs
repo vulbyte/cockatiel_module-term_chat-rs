@@ -65,13 +65,28 @@ fn bracket_content(
     }
     if config.show_rank && !msg.rank.is_empty() && msg.rank != "regular"
         && !user_bit.is_empty() {
-            user_bit.push_str(&format!(" ({})", msg.rank));
+            let rank_txt = format!(" ({})", msg.rank);
+            if config.show_rank_color {
+                user_bit.push_str(&format!("\x1b[35m{}\x1b[0m", rank_txt));
+            } else {
+                user_bit.push_str(&rank_txt);
+            }
         }
     if config.show_role_badges && !msg.role_badges.is_empty() {
         if !user_bit.is_empty() {
             user_bit.push(' ');
         }
-        user_bit.push_str(&msg.role_badges);
+        if config.show_status_color {
+            user_bit.push_str(&format!("\x1b[33m{}\x1b[0m", msg.role_badges));
+        } else {
+            user_bit.push_str(&msg.role_badges);
+        }
+    }
+    if config.show_reprimand && msg.reprimanded {
+        if !user_bit.is_empty() {
+            user_bit.push(' ');
+        }
+        user_bit.push_str("\x1b[31mR\x1b[0m");
     }
     if !user_bit.is_empty() {
         parts.push(user_bit);
@@ -418,5 +433,84 @@ fn draw_overlays(
             print!("\x1b[40m\x1b[37m{}{}\x1b[0m", prefix, padded);
             Ok(())
         }
+    }
+}
+#[cfg(test)]
+mod bracket_tests {
+    use super::*;
+    use crate::config::ChatConfig;
+    use crate::types::ChatMessageItem;
+    use std::time::Instant;
+
+    fn item(username: &str, rank: &str, badges: &str, reprimanded: bool) -> ChatMessageItem {
+        ChatMessageItem {
+            id: "id".into(),
+            username: username.into(),
+            name_color: String::new(),
+            rank: rank.into(),
+            score: 0,
+            role_badges: badges.into(),
+            reprimanded,
+            platform: "tw".into(),
+            user_handle: String::new(),
+            user_uuid7: String::new(),
+            content: "hi".into(),
+            image_art: None,
+            image_status: None,
+            added_at: Instant::now(),
+        }
+    }
+
+    #[test]
+    fn reprimand_marker_gated_by_toggle() {
+        let mut cfg = ChatConfig::default();
+        cfg.show_reprimand = true;
+        let b = bracket_content(&item("bob", "", "", true), &cfg);
+        assert!(b.contains('R'));
+        assert!(b.contains("\x1b[31m"));
+        cfg.show_reprimand = false;
+        let b = bracket_content(&item("bob", "", "", true), &cfg);
+        assert!(!b.contains('R'));
+    }
+
+    #[test]
+    fn no_marker_when_not_reprimanded() {
+        let cfg = ChatConfig::default();
+        let b = bracket_content(&item("bob", "", "", false), &cfg);
+        assert!(!b.contains('R'));
+    }
+
+    #[test]
+    fn rank_colored_when_toggle_on() {
+        let mut cfg = ChatConfig::default();
+        cfg.show_rank_color = true;
+        let b = bracket_content(&item("bob", "opal", "", false), &cfg);
+        assert!(b.contains("\x1b[35m"));
+        assert!(b.contains("opal"));
+        cfg.show_rank_color = false;
+        let b = bracket_content(&item("bob", "opal", "", false), &cfg);
+        assert!(!b.contains("\x1b[35m"));
+    }
+
+    #[test]
+    fn badges_colored_when_toggle_on() {
+        let mut cfg = ChatConfig::default();
+        cfg.show_status_color = true;
+        let b = bracket_content(&item("bob", "", "MOD", false), &cfg);
+        assert!(b.contains("\x1b[33m"));
+        assert!(b.contains("MOD"));
+        cfg.show_status_color = false;
+        let b = bracket_content(&item("bob", "", "MOD", false), &cfg);
+        assert!(!b.contains("\x1b[33m"));
+    }
+
+    #[test]
+    fn everything_together() {
+        let cfg = ChatConfig::default();
+        let b = bracket_content(&item("bob", "opal", "MOD", true), &cfg);
+        assert!(b.contains("bob"));
+        assert!(b.contains("opal"));
+        assert!(b.contains("MOD"));
+        assert!(b.contains('R'));
     }
 }
