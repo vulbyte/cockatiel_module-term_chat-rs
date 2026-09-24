@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use base64::Engine;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tracing::warn;
 
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
@@ -67,7 +69,15 @@ fn load_login() -> Option<LoginState> {
 
 pub fn save_login(state: &LoginState) {
     if let Ok(pretty) = serde_json::to_string_pretty(state) {
-        let _ = std::fs::write("login.json", pretty);
+        let path = "login.json";
+        if std::fs::write(path, pretty).is_ok() {
+            // This file holds OAuth tokens — keep it owner-only on unix.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+            }
+        }
     }
 }
 
@@ -206,6 +216,7 @@ pub async fn login_twitch(eng: &EngineHandle, channel: &str, cfg: &ChatConfig) -
     let val: serde_json::Value = client
         .get("https://id.twitch.tv/oauth2/validate")
         .header("Authorization", format!("OAuth {}", token))
+        .timeout(Duration::from_secs(20))
         .send()
         .await
         .map_err(|e| format!("twitch validate failed: {}", e))?
@@ -229,6 +240,7 @@ pub async fn login_twitch(eng: &EngineHandle, channel: &str, cfg: &ChatConfig) -
             .query(&[("login", channel)])
             .header("Authorization", format!("Bearer {}", token))
             .header("Client-Id", &client_id)
+            .timeout(Duration::from_secs(20))
             .send()
             .await
             .map_err(|e| format!("twitch users failed: {}", e))?
@@ -250,6 +262,7 @@ pub async fn login_twitch(eng: &EngineHandle, channel: &str, cfg: &ChatConfig) -
         .get("https://api.twitch.tv/helix/moderation/channels")
         .header("Authorization", format!("Bearer {}", token))
         .header("Client-Id", &client_id)
+        .timeout(Duration::from_secs(20))
         .send()
         .await
         .map_err(|e| format!("twitch moderated channels failed: {}", e))?
@@ -276,9 +289,48 @@ pub async fn login_twitch(eng: &EngineHandle, channel: &str, cfg: &ChatConfig) -
 
 // ── Kick ───────────────────────────────────────────────────────────────
 
+/// Read a JSON value as a string whether the API returns it as a JSON string
+/// or as a number (Kick's ids are integers on the wire).
+fn json_value_to_string(v: &serde_json::Value) -> Option<String> {
+    v.as_str()
+        .map(|s| s.to_string())
+        .or_else(|| v.as_i64().map(|n| n.to_string()))
+        .or_else(|| v.as_u64().map(|n| n.to_string()))
+}
+
+/// Resolve a typed handle to its Kick channel and return true only when that
+/// channel is the one the OAuth token actually belongs to.
+async fn kick_channel_resolves_to_token(
+    client: &reqwest::Client,
+    typed_handle: &str,
+    token_user_id: Option<&str>,
+) -> bool {
+    let Some(token_id) = token_user_id else {
+        return false;
+    };
+    let Ok(resp) = client
+        .get("https://api.kick.com/public/v1/channels")
+        .query(&[("slug", typed_handle)])
+        .timeout(Duration::from_secs(20))
+        .send()
+        .await
+    else {
+        return false;
+    };
+    let Ok(json) = resp.json::<serde_json::Value>().await else {
+        return false;
+    };
+    json.pointer("/data/0/broadcaster_user_id")
+        .and_then(json_value_to_string)
+        .map(|id| id == token_id)
+        .unwrap_or(false)
+}
+
 /// Kick login: OAuth authorization-code + PKCE. Mod-level if the token has
-/// moderation:ban; send if it has chat:write. Identity falls back to the
-/// handle the operator entered (Kick has no reliable self-check endpoint).
+/// moderation:ban; send if it has chat:write. The OAuth token is the source of
+/// truth for identity: it is resolved via the public API self-check, and a
+/// handle the operator typed is only trusted when it resolves to that same
+/// channel.
 pub async fn login_kick(eng: &EngineHandle, fallback_handle: &str, cfg: &ChatConfig) -> Result<LoginState, String> {
     let creds = eng.adapter_credentials("kick-adapter").await?;
     let client_id = creds.get("client_id").cloned().unwrap_or_default();
@@ -305,6 +357,7 @@ pub async fn login_kick(eng: &EngineHandle, fallback_handle: &str, cfg: &ChatCon
             ("redirect_uri", redirect_uri(cfg.oauth_redirect_port).as_str()),
             ("code_verifier", verifier.as_str()),
         ])
+        .timeout(Duration::from_secs(20))
         .send()
         .await
         .map_err(|e| format!("kick token failed: {}", e))?
@@ -331,22 +384,51 @@ pub async fn login_kick(eng: &EngineHandle, fallback_handle: &str, cfg: &ChatCon
     }
     let send_scope = scopes.iter().any(|s| s == "chat:write");
 
-    // Try to derive the handle from the public API; fall back to operator entry.
-    let mut handle = fallback_handle.to_string();
-    if handle.is_empty() {
-        if let Ok(resp) = client
-            .get("https://api.kick.com/public/v1/users")
-            .header("Authorization", format!("Bearer {}", access))
-            .send()
-            .await
-        {
-            if let Ok(json) = resp.json::<serde_json::Value>().await {
-                if let Some(u) = json.pointer("/data/0/username").and_then(|v| v.as_str()) {
-                    handle = u.to_string();
-                }
-            }
+    // The OAuth token is the source of truth: resolve the channel it belongs to
+    // via the public API self-check.
+    let mut token_username = String::new();
+    let mut token_user_id: Option<String> = None;
+    if let Ok(resp) = client
+        .get("https://api.kick.com/public/v1/users")
+        .header("Authorization", format!("Bearer {}", access))
+        .timeout(Duration::from_secs(20))
+        .send()
+        .await
+    {
+        if let Ok(json) = resp.json::<serde_json::Value>().await {
+            token_username = json
+                .pointer("/data/0/username")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            token_user_id = json.pointer("/data/0/user_id").and_then(json_value_to_string);
         }
     }
+
+    // A handle the operator typed is only trusted when it matches the token's
+    // own channel (by username, or by resolving the typed handle to the same
+    // broadcaster id). Anything else falls back to the token's own channel.
+    let handle = if fallback_handle.trim().is_empty() {
+        token_username.clone()
+    } else {
+        let typed = fallback_handle.trim();
+        let matches_self = !token_username.is_empty() && token_username.eq_ignore_ascii_case(typed);
+        let resolves_to_token =
+            kick_channel_resolves_to_token(&client, typed, token_user_id.as_deref()).await;
+        if matches_self || resolves_to_token {
+            if token_username.is_empty() {
+                typed.to_string()
+            } else {
+                token_username.clone()
+            }
+        } else {
+            warn!(
+                "[login] typed kick handle '{}' does not match the OAuth token's channel; using the token's own identity",
+                typed
+            );
+            token_username.clone()
+        }
+    };
 
     Ok(LoginState {
         platform: "kick".to_string(),
@@ -384,6 +466,7 @@ pub async fn login_youtube(eng: &EngineHandle, cfg: &ChatConfig) -> Result<Login
             ("redirect_uri", redirect_uri(cfg.oauth_redirect_port).as_str()),
             ("grant_type", "authorization_code"),
         ])
+        .timeout(Duration::from_secs(20))
         .send()
         .await
         .map_err(|e| format!("google token failed: {}", e))?
@@ -401,6 +484,7 @@ pub async fn login_youtube(eng: &EngineHandle, cfg: &ChatConfig) -> Result<Login
         .get("https://www.googleapis.com/youtube/v3/channels")
         .query(&[("part", "id,snippet"), ("mine", "true")])
         .header("Authorization", format!("Bearer {}", access))
+        .timeout(Duration::from_secs(20))
         .send()
         .await
         .map_err(|e| format!("youtube channels failed: {}", e))?

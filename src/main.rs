@@ -19,7 +19,8 @@ use crossterm::{
     terminal,
     ExecutableCommand,
 };
-use tokio::sync::{mpsc, Mutex};
+use regex::Regex;
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tracing::{warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
@@ -40,9 +41,10 @@ use types::{AppStatus, ChatMessageItem, UiMode};
 fn build_message_item(
     payload: &Payload,
     emoji_map: &HashMap<String, String>,
+    emoji_regexes: &HashMap<String, Regex>,
     emoji_enabled: bool,
 ) -> Option<ChatMessageItem> {
-    let (platform, content, username, name_color, rank, score, reprimanded, role_badges, user_handle, user_uuid7) =
+    let (platform, content, username, name_color, rank, score, reprimanded, role_badges, user_handle, user_uuid7, message_uuid7, stage) =
         match payload {
             Payload::MessagePostProcess(pp) => {
                 let raw = pp.raw_message.as_ref();
@@ -87,6 +89,8 @@ fn build_message_item(
                     role_badges,
                     raw.map(|cm| cm.user_uuid7.clone()).unwrap_or_default(),
                     raw.map(|cm| cm.user_uuid7.clone()).unwrap_or_default(),
+                    pp.message_uuid7.clone(),
+                    "post",
                 )
             }
             Payload::MessagePreProcess(pre) => {
@@ -128,19 +132,32 @@ fn build_message_item(
                     role_badges,
                     raw.map(|cm| cm.user_uuid7.clone()).unwrap_or_default(),
                     raw.map(|cm| cm.user_uuid7.clone()).unwrap_or_default(),
+                    pre.message_uuid7.clone(),
+                    "pre",
                 )
             }
             _ => return None,
         };
 
     let content = if emoji_enabled {
-        emoji::apply(emoji_map, &content)
+        emoji::apply(emoji_map, emoji_regexes, &content)
     } else {
         content
     };
 
+    // Key the item by the engine's message uuid7 so an engine re-delivery
+    // (recovery re-queue of the SAME pipeline stage) coalesces into the same
+    // item instead of rendering a duplicate. The stage is part of the key
+    // because pre-process (raw, "in-progress") and post-process (processed)
+    // are distinct, intentional displays of the same message.
+    let id = if message_uuid7.is_empty() {
+        uuid::Uuid::now_v7().to_string()
+    } else {
+        format!("{}:{}", stage, message_uuid7)
+    };
+
     Some(ChatMessageItem {
-        id: uuid::Uuid::now_v7().to_string(),
+        id,
         username,
         name_color,
         rank,
@@ -180,11 +197,12 @@ fn spawn_image_render(
     messages: Arc<Mutex<Vec<ChatMessageItem>>>,
     item: ChatMessageItem,
     image_map: Arc<HashMap<String, String>>,
+    image_regexes: Arc<HashMap<String, Regex>>,
 ) {
     if config.images_mode != "all" {
         return;
     }
-    let urls = images::collect_image_urls(&item.content, &image_map);
+    let urls = images::collect_image_urls(&item.content, &image_map, &image_regexes);
     if urls.is_empty() {
         return;
     }
@@ -273,6 +291,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         HashMap::new()
     };
+    // Precompile the word-boundary emoji regexes once (they run on the
+    // AuthVerify hot path); rebuild whenever the map is reloaded.
+    let emoji_regexes = emoji::compile_regexes(&emoji_map);
 
     // Connect to the engine and split the stream so we can both send and receive.
     let cockatiel = cockatiel_client::CockatielClient::connect("term-chat-rs.json").await?;
@@ -283,11 +304,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cockatiel.instance_uuid7.clone(),
         write,
     );
+    // Shared so the read task can swap in a fresh handle on reconnect while the
+    // TUI keeps sending through the CURRENT connection.
+    let engine_state: Arc<RwLock<EngineHandle>> = Arc::new(RwLock::new(engine));
 
     let messages: Arc<Mutex<Vec<ChatMessageItem>>> = Arc::new(Mutex::new(Vec::new()));
     let pending: Arc<Mutex<EasingQueue>> = Arc::new(Mutex::new(EasingQueue::new(
         config.easing_enabled,
         config.easing_target_per_min,
+        config.max_buffered,
     )));
     let status: Arc<Mutex<AppStatus>> = Arc::new(Mutex::new(AppStatus::default()));
     let renderer = Arc::new(ImageRenderer::new(
@@ -297,96 +322,185 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ));
     let image_map: Arc<HashMap<String, String>> =
         Arc::new(images::load_map(&config.image_map_path));
+    let image_regexes: Arc<HashMap<String, Regex>> =
+        Arc::new(images::compile_map_regexes(image_map.as_ref()));
+    let audio_fetcher = audio::AudioFetcher::default();
 
-    // Read task: engine -> UI.
+    // Read task: engine -> UI, with automatic reconnect (exponential backoff).
     {
         let pending = Arc::clone(&pending);
+        let messages = Arc::clone(&messages);
         let status = Arc::clone(&status);
-        let result_tx = engine.result_sender();
         let emoji_map = emoji_map.clone();
+        let emoji_regexes = emoji_regexes.clone();
         let emoji_enabled = config.emoji_enabled;
-        let engine_task = engine.clone();
         // Audio playback settings (TTS clips).
         let play_audio = config.play_audio;
         let audio_volume = config.audio_volume;
         let max_audio_seconds = config.max_audio_seconds;
+        let audio_fetcher = audio_fetcher.clone();
+        let engine_state = Arc::clone(&engine_state);
         tokio::spawn(async move {
-            let mut read = read;
+            let mut read: Option<_> = Some(read);
+            let mut backoff = Duration::from_secs(1);
             loop {
-                let Some(msg) = read.next().await else {
-                    let mut status_guard = status.lock().await;
-                    status_guard.connected = false;
-                    status_guard.detail = "disconnected from engine".to_string();
-                    break;
-                };
-                let Ok(WsMessage::Binary(data)) = msg else {
-                    continue;
-                };
-                let Ok(container) = cockatiel_client::proto::Container::decode(data.as_ref()) else {
-                    continue;
-                };
-                let Some(payload) = container.payload else {
-                    continue;
-                };
-                // Answer the engine's liveness probe with our auth token.
-                if let Payload::AuthVerify(_) = &payload {
-                    let _ = engine_task
-                        .send_payload(Payload::AuthVerify(cockatiel_client::proto::AuthVerify {
-                            cur_auth: engine_task.auth_token.clone(),
-                        }))
-                        .await;
-                    continue;
-                }
-                // Acknowledge pipeline messages so the engine advances the chain
-                // immediately instead of waiting out the ack timeout.
-                let ack_uuid: Option<String> = match &payload {
-                    Payload::MessagePreProcess(m) => {
-                        if m.message_uuid7.is_empty() { None } else { Some(m.message_uuid7.clone()) }
-                    }
-                    Payload::MessageInProcess(m) => {
-                        if m.message_uuid7.is_empty() { None } else { Some(m.message_uuid7.clone()) }
-                    }
-                    Payload::MessagePostProcess(m) => {
-                        if m.message_uuid7.is_empty() { None } else { Some(m.message_uuid7.clone()) }
-                    }
-                    _ => None,
-                };
-                if let Some(u) = ack_uuid {
-                    let _ = engine_task.ack_message(&u).await;
-                }
+                // The CURRENT engine handle (the read task is the only one that
+                // swaps it; the TUI sends through it too).
+                let engine = engine_state.read().await.clone();
 
-                match payload {
-                    Payload::DatabaseQueryResult(qr) => {
-                        let _ = result_tx.send(qr);
+                let Some(stream) = read.as_mut() else {
+                    // Disconnected — reconnect with exponential backoff
+                    // (1s, 2s, 4s ... capped at 30s), then re-subscribe by
+                    // re-running the engine handshake and swapping in the new
+                    // handle (fresh write sink, auth, instance uuid).
+                    {
+                        let mut status_guard = status.lock().await;
+                        status_guard.connected = false;
+                        status_guard.detail = format!("reconnecting in {}s...", backoff.as_secs());
                     }
-                    // term-chat is a display-only module, NOT an interactive
-                    // surface. Engine/module prompts are deliberately ignored
-                    // here so they never interrupt the chat stream — the TUI is
-                    // the interface that answers them.
-                    Payload::Prompt(_) => {}
-                    other => {
-                        if let Some(item) = build_message_item(&other, &emoji_map, emoji_enabled) {
-                            let mut pending_guard = pending.lock().await;
-                            pending_guard.push(item);
+                    tokio::time::sleep(backoff).await;
+                    match cockatiel_client::CockatielClient::connect("term-chat-rs.json").await {
+                        Ok(client) => {
+                            let (write, new_read) = client.stream.split();
+                            let new_engine = EngineHandle::new(
+                                client.auth_token,
+                                client.config.module_name.clone(),
+                                client.instance_uuid7,
+                                write,
+                            );
+                            *engine_state.write().await = new_engine.clone();
+                            read = Some(new_read);
+                            backoff = Duration::from_secs(1);
+                            let mut status_guard = status.lock().await;
+                            status_guard.connected = true;
+                            status_guard.detail = "connected to cockatiel engine".to_string();
                         }
-                        // Audio playback (TTS clips): audio created by a
-                        // pre/in-process module rides WITH the message; audio
-                        // created at the post-process stage is saved to the
-                        // timeline and fetched here.
-                        if play_audio {
-                            if let Payload::MessagePostProcess(pp) = &other {
-                                if !pp.audio.is_empty() {
-                                    audio::play_audio(pp.audio.clone(), audio_volume, max_audio_seconds);
-                                } else if !pp.message_uuid7.is_empty() {
-                                    let eng = engine_task.clone();
-                                    let uuid = pp.message_uuid7.clone();
-                                    tokio::spawn(async move {
-                                        audio::fetch_and_play(&eng, &uuid, audio_volume, max_audio_seconds).await;
-                                    });
+                        Err(e) => {
+                            warn!("[engine] reconnect failed: {}", e);
+                            backoff = (backoff * 2).min(Duration::from_secs(30));
+                        }
+                    }
+                    continue;
+                };
+
+                match stream.next().await {
+                    None => {
+                        // Engine went away — mark disconnected; the next loop
+                        // iteration reconnects.
+                        let mut status_guard = status.lock().await;
+                        status_guard.connected = false;
+                        status_guard.detail = "disconnected from engine".to_string();
+                        read = None;
+                    }
+                    Some(Err(e)) => {
+                        warn!("[engine] read error: {}", e);
+                        let mut status_guard = status.lock().await;
+                        status_guard.connected = false;
+                        status_guard.detail = "disconnected from engine".to_string();
+                        read = None;
+                    }
+                    Some(Ok(WsMessage::Binary(data))) => {
+                        let Ok(container) =
+                            cockatiel_client::proto::Container::decode(data.as_ref())
+                        else {
+                            continue;
+                        };
+                        let Some(payload) = container.payload else {
+                            continue;
+                        };
+                        // Answer the engine's liveness probe with our auth token.
+                        if let Payload::AuthVerify(_) = &payload {
+                            let _ = engine
+                                .send_payload(Payload::AuthVerify(
+                                    cockatiel_client::proto::AuthVerify {
+                                        cur_auth: engine.auth_token.clone(),
+                                    },
+                                ))
+                                .await;
+                            continue;
+                        }
+                        // Acknowledge pipeline messages so the engine advances the
+                        // chain immediately instead of waiting out the ack timeout.
+                        let ack_uuid: Option<String> = match &payload {
+                            Payload::MessagePreProcess(m) => {
+                                if m.message_uuid7.is_empty() { None } else { Some(m.message_uuid7.clone()) }
+                            }
+                            Payload::MessageInProcess(m) => {
+                                if m.message_uuid7.is_empty() { None } else { Some(m.message_uuid7.clone()) }
+                            }
+                            Payload::MessagePostProcess(m) => {
+                                if m.message_uuid7.is_empty() { None } else { Some(m.message_uuid7.clone()) }
+                            }
+                            _ => None,
+                        };
+                        if let Some(u) = ack_uuid {
+                            let _ = engine.ack_message(&u).await;
+                        }
+
+                        match payload {
+                            Payload::DatabaseQueryResult(qr) => {
+                                let _ = engine.result_sender().send(qr);
+                            }
+                            // term-chat is a display-only module, NOT an
+                            // interactive surface. Engine/module prompts are
+                            // deliberately ignored here so they never interrupt
+                            // the chat stream — the TUI is the interface that
+                            // answers them.
+                            Payload::Prompt(_) => {}
+                            other => {
+                                if let Some(item) =
+                                    build_message_item(&other, &emoji_map, &emoji_regexes, emoji_enabled)
+                                {
+                                    // The item id is keyed by the engine message uuid7 (per pipeline
+                                    // stage), so an engine re-delivery of the
+                                    // same stage coalesces: don't push a message
+                                    // already shown or already pending.
+                                    let already_shown = {
+                                        let msgs = messages.lock().await;
+                                        msgs.iter().any(|m| m.id == item.id)
+                                    };
+                                    if !already_shown {
+                                        let mut pending_guard = pending.lock().await;
+                                        if !pending_guard.contains_id(&item.id) {
+                                            pending_guard.push(item);
+                                        }
+                                    }
+                                }
+                                // Audio playback (TTS clips): audio created by a
+                                // pre/in-process module rides WITH the message;
+                                // audio created at the post-process stage is
+                                // saved to the timeline and fetched here.
+                                if play_audio {
+                                    if let Payload::MessagePostProcess(pp) = &other {
+                                        if !pp.audio.is_empty() {
+                                            audio_fetcher.play_inline(
+                                                &pp.message_uuid7,
+                                                pp.audio.clone(),
+                                                audio_volume,
+                                                max_audio_seconds,
+                                            );
+                                        } else if !pp.message_uuid7.is_empty() {
+                                            let eng = engine.clone();
+                                            let uuid = pp.message_uuid7.clone();
+                                            let fetcher = audio_fetcher.clone();
+                                            tokio::spawn(async move {
+                                                fetcher
+                                                    .fetch_and_play(&eng, &uuid, audio_volume, max_audio_seconds)
+                                                    .await;
+                                            });
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
+                    Some(Ok(WsMessage::Close(_))) => {
+                        let mut status_guard = status.lock().await;
+                        status_guard.connected = false;
+                        status_guard.detail = "disconnected from engine".to_string();
+                        read = None;
+                    }
+                    Some(Ok(_)) => {}
                 }
             }
         });
@@ -401,10 +515,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         messages,
         pending,
         status,
-        &engine,
+        &engine_state,
         &config,
         renderer,
         image_map,
+        image_regexes,
     )
     .await;
 
@@ -424,10 +539,11 @@ async fn run_tui(
     messages: Arc<Mutex<Vec<ChatMessageItem>>>,
     pending: Arc<Mutex<EasingQueue>>,
     status: Arc<Mutex<AppStatus>>,
-    engine: &EngineHandle,
+    engine: &Arc<RwLock<EngineHandle>>,
     config: &ChatConfig,
     renderer: Arc<ImageRenderer>,
     image_map: Arc<HashMap<String, String>>,
+    image_regexes: Arc<HashMap<String, Regex>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<crossterm::event::Event>();
 
@@ -470,7 +586,14 @@ async fn run_tui(
             let added = drained.len();
             let mut msgs = messages.lock().await;
             for mut item in drained {
-                spawn_image_render(config, Arc::clone(&renderer), Arc::clone(&messages), item.clone(), Arc::clone(&image_map));
+                spawn_image_render(
+                    config,
+                    Arc::clone(&renderer),
+                    Arc::clone(&messages),
+                    item.clone(),
+                    Arc::clone(&image_map),
+                    Arc::clone(&image_regexes),
+                );
                 // The fade clock starts when the message becomes visible.
                 item.added_at = now;
                 msgs.push(item);
@@ -531,7 +654,7 @@ async fn handle_event(
     ev: crossterm::event::Event,
     ui: &mut Ui,
     login: &mut LoginState,
-    engine: &EngineHandle,
+    engine: &Arc<RwLock<EngineHandle>>,
     config: &ChatConfig,
     messages: &Arc<Mutex<Vec<ChatMessageItem>>>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
@@ -561,7 +684,7 @@ async fn handle_key(
     key: KeyEvent,
     ui: &mut Ui,
     login: &mut LoginState,
-    engine: &EngineHandle,
+    engine: &Arc<RwLock<EngineHandle>>,
     config: &ChatConfig,
     messages: &Arc<Mutex<Vec<ChatMessageItem>>>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
@@ -715,7 +838,10 @@ async fn handle_key(
                 let text = ui.draft.trim().to_string();
                 if !text.is_empty() && login.can_send() {
                     let actor = (login.platform.as_str(), login.handle.as_str());
-                    match engine.send_message(&ui.target_platform, &text, Some(actor)).await {
+                    // Send through the CURRENT engine handle (may have been
+                    // swapped by a reconnect).
+                    let eng = engine.read().await.clone();
+                    match eng.send_message(&ui.target_platform, &text, Some(actor)).await {
                         Ok(()) => ui.result_note = "sent".to_string(),
                         Err(e) => ui.result_note = format!("send failed: {}", e),
                     }
@@ -734,7 +860,7 @@ async fn handle_key(
 }
 
 async fn do_login(
-    engine: &EngineHandle,
+    engine: &Arc<RwLock<EngineHandle>>,
     ui: &mut Ui,
     login: &mut LoginState,
     platform: &str,
@@ -747,8 +873,8 @@ async fn do_login(
     // For Twitch we need the monitored channel to verify the operator is the
     // owner / a moderator of it.
     let channel = if platform == "twitch" {
-        engine
-            .adapter_credentials("twitch-adapter")
+        let eng = engine.read().await.clone();
+        eng.adapter_credentials("twitch-adapter")
             .await
             .map(|m| m.get("channel").cloned().unwrap_or_default())
             .unwrap_or_default()
@@ -756,7 +882,10 @@ async fn do_login(
         String::new()
     };
 
-    match login::login_and_verify(engine, platform, &channel, kick_handle, config).await {
+    // Clone the current handle so the (long) OAuth flow doesn't hold the
+    // engine lock and block a reconnect swap.
+    let eng = engine.read().await.clone();
+    match login::login_and_verify(&eng, platform, &channel, kick_handle, config).await {
         Ok(state) => {
             *login = state;
             ui.login_note = format!(
@@ -773,7 +902,7 @@ async fn do_login(
 }
 
 async fn send_mod_action(
-    engine: &EngineHandle,
+    engine: &Arc<RwLock<EngineHandle>>,
     ui: &mut Ui,
     login: &LoginState,
     query_id: &str,
@@ -794,7 +923,8 @@ async fn send_mod_action(
         target["duration_secs"] = serde_json::json!(secs);
     }
 
-    match engine.mod_action(query_id, &target, login).await {
+    let eng = engine.read().await.clone();
+    match eng.mod_action(query_id, &target, login).await {
         Ok(resp) if resp.success => {
             ui.result_note = format!("{} applied", query_id);
         }

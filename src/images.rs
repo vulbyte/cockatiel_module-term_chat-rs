@@ -2,17 +2,33 @@ use std::collections::HashMap;
 use std::io::{Cursor, Write};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 
 use regex::Regex;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
+
+/// Hard cap on a single downloaded image's bytes (10 MB).
+const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+/// Max concurrent image downloads (bounds memory under a fast chat).
+const MAX_CONCURRENT_DOWNLOADS: usize = 8;
+/// Per-download HTTP timeout.
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// The raw image-URL pattern is fixed; compile it once instead of per message.
+fn image_url_regex() -> &'static Regex {
+    static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"https?://[^\s<>]+?\.(?:png|jpe?g|gif|webp)(?:\?[^\s<>]*)?")
+            .expect("image URL regex must compile")
+    })
+}
 
 /// Extract candidate image/gif URLs from a chat message's text.
 pub fn extract_image_urls(text: &str) -> Vec<String> {
-    let re = Regex::new(
-        r"https?://[^\s<>]+?\.(?:png|jpe?g|gif|webp)(?:\?[^\s<>]*)?",
-    )
-    .unwrap();
-    re.find_iter(text).map(|m| m.as_str().to_string()).collect()
+    image_url_regex()
+        .find_iter(text)
+        .map(|m| m.as_str().to_string())
+        .collect()
 }
 
 /// Load a string → URL map from a JSON file: `{ "token": "url", ... }`.
@@ -23,17 +39,36 @@ pub fn load_map(path: &str) -> HashMap<String, String> {
         .unwrap_or_default()
 }
 
+/// Precompile the word-boundary regex for every map key ONCE (this runs per
+/// message on the AuthVerify hot path). Rebuild whenever the map changes.
+pub fn compile_map_regexes(map: &HashMap<String, String>) -> HashMap<String, Regex> {
+    let mut out = HashMap::with_capacity(map.len());
+    for key in map.keys() {
+        if key.is_empty() {
+            continue;
+        }
+        let pattern = format!(r"\b{}\b", regex::escape(key));
+        if let Ok(re) = Regex::new(&pattern) {
+            out.insert(key.clone(), re);
+        }
+    }
+    out
+}
+
 /// Resolve `:token:` / standalone `token` occurrences to their mapped URLs.
-fn mapped_urls(text: &str, map: &HashMap<String, String>) -> Vec<String> {
+fn mapped_urls(
+    text: &str,
+    map: &HashMap<String, String>,
+    regexes: &HashMap<String, Regex>,
+) -> Vec<String> {
     let mut out = Vec::new();
     for (key, val) in map {
         if val.is_empty() {
             continue;
         }
         let colon = format!(":{}:", key);
-        let word = format!(r"\b{}\b", regex::escape(key));
         let colon_hit = text.contains(&colon);
-        let word_hit = Regex::new(&word).map(|re| re.is_match(text)).unwrap_or(false);
+        let word_hit = regexes.get(key).map(|re| re.is_match(text)).unwrap_or(false);
         if colon_hit || word_hit {
             out.push(val.clone());
         }
@@ -43,7 +78,11 @@ fn mapped_urls(text: &str, map: &HashMap<String, String>) -> Vec<String> {
 
 /// Collect every image URL to embed: raw image/gif URLs in the text PLUS any
 /// URLs a mapped token resolves to.
-pub fn collect_image_urls(text: &str, map: &HashMap<String, String>) -> Vec<String> {
+pub fn collect_image_urls(
+    text: &str,
+    map: &HashMap<String, String>,
+    regexes: &HashMap<String, Regex>,
+) -> Vec<String> {
     let mut urls = extract_image_urls(text);
     let mut dedup: Vec<String> = Vec::new();
     for u in urls.drain(..) {
@@ -51,7 +90,7 @@ pub fn collect_image_urls(text: &str, map: &HashMap<String, String>) -> Vec<Stri
             dedup.push(u);
         }
     }
-    for u in mapped_urls(text, map) {
+    for u in mapped_urls(text, map, regexes) {
         if !dedup.contains(&u) {
             dedup.push(u);
         }
@@ -86,6 +125,8 @@ pub struct ImageRenderer {
     pub width: usize,
     pub referer: String,
     cache: Cache,
+    /// Bounds concurrent downloads (memory safety under a fast chat).
+    download_semaphore: Arc<Semaphore>,
 }
 
 impl ImageRenderer {
@@ -95,6 +136,7 @@ impl ImageRenderer {
             width,
             referer,
             cache: Arc::new(Mutex::new(ImageCache::default())),
+            download_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_DOWNLOADS)),
         }
     }
 
@@ -126,6 +168,13 @@ impl ImageRenderer {
     }
 
     async fn render_uncached(&self, url: &str, cols: u16, rows: u16) -> RenderResult {
+        // Bound concurrent downloads so a fast chat can't spawn unbounded HTTP
+        // fetches / in-flight byte buffers.
+        let permit = match self.download_semaphore.acquire().await {
+            Ok(p) => p,
+            Err(_) => return RenderResult::Reason("download failed".to_string()),
+        };
+
         let client = reqwest::Client::builder()
             .user_agent(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
@@ -136,7 +185,7 @@ impl ImageRenderer {
         if !self.referer.is_empty() {
             req = req.header("Referer", self.referer.as_str());
         }
-        let resp = match req.send().await {
+        let resp = match req.timeout(DOWNLOAD_TIMEOUT).send().await {
             Ok(r) => r,
             Err(_) => return RenderResult::Reason("download failed".to_string()),
         };
@@ -160,6 +209,21 @@ impl ImageRenderer {
             return RenderResult::Reason("not an image".to_string());
         }
 
+        // Byte cap: reject by Content-Length when the server reports one, and
+        // re-check the downloaded bytes afterwards (some servers send no
+        // Content-Length; the in-memory read still lets us drop oversized
+        // payloads before they're decoded).
+        if let Some(cl) = resp
+            .headers()
+            .get(reqwest::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<usize>().ok())
+        {
+            if cl > MAX_IMAGE_BYTES {
+                return RenderResult::Reason("image too large".to_string());
+            }
+        }
+
         let bytes = match resp.bytes().await {
             Ok(b) => b,
             Err(_) => return RenderResult::Reason("download failed".to_string()),
@@ -167,6 +231,10 @@ impl ImageRenderer {
         if bytes.is_empty() {
             return RenderResult::Reason("download failed".to_string());
         }
+        if bytes.len() > MAX_IMAGE_BYTES {
+            return RenderResult::Reason("image too large".to_string());
+        }
+        drop(permit); // download done — release before decode/convert
 
         // Decode to get the source dimensions (needed to preserve aspect).
         let img = match image::ImageReader::new(Cursor::new(&bytes))
@@ -321,5 +389,23 @@ mod tests {
         let k2 = format!("{}|{}x{}", "http://x/i.png", 60u16, 20u16);
         assert_ne!(k1, k2);
         let _ = renderer; // field presence sanity
+    }
+
+    #[test]
+    fn collect_includes_raw_and_mapped_urls() {
+        let map = HashMap::from([("kek".to_string(), "http://x/kek.png".to_string())]);
+        let regexes = compile_map_regexes(&map);
+        let urls = collect_image_urls("check this :kek: http://a/b.png", &map, &regexes);
+        assert!(urls.contains(&"http://x/kek.png".to_string()));
+        assert!(urls.contains(&"http://a/b.png".to_string()));
+    }
+
+    #[test]
+    fn mapped_url_is_word_boundary_aware() {
+        let map = HashMap::from([("cat".to_string(), "http://x/cat.gif".to_string())]);
+        let regexes = compile_map_regexes(&map);
+        // "cat" inside "scatter" must NOT match — only the standalone token.
+        let urls = collect_image_urls("scatter is not a cat", &map, &regexes);
+        assert_eq!(urls, vec!["http://x/cat.gif".to_string()]);
     }
 }
