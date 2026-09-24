@@ -173,6 +173,8 @@ pub fn draw(
             age,
             config.message_fade_secs,
             FadeMode::parse(&config.message_fade_mode),
+            config.fade_dim_fraction,
+            config.fade_dim_max_secs,
         );
         let dimmed = fade_action == FadeAction::Dim;
         let line = RenderedLine {

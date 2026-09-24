@@ -123,7 +123,7 @@ fn extract_value(request: &str, param: &str) -> Option<String> {
 /// loopback redirect port. Handles both `?code=`/`?token=` query redirects and
 /// the `#access_token=` fragment (via a JS forwarding page) used by Twitch's
 /// implicit flow.
-async fn capture_auth_redirect(auth_url: &str, port: u16) -> Result<String, String> {
+async fn capture_auth_redirect(auth_url: &str, port: u16, attempts: u32) -> Result<String, String> {
     let listener = TcpListener::bind(format!("127.0.0.1:{}", port))
         .await
         .map_err(|e| format!("could not bind localhost:{}: {}", port, e))?;
@@ -133,7 +133,7 @@ async fn capture_auth_redirect(auth_url: &str, port: u16) -> Result<String, Stri
     let error_html = "<html><body style='background:#0e0e10;color:#efeff1;font-family:system-ui,sans-serif;text-align:center;padding-top:120px;'><h1 style='color:#ff4f4f;'>Authentication failed</h1><p>Return to your terminal.</p></body></html>";
     let landing_html = "<html><script>if(window.location.hash){var h=new URLSearchParams(window.location.hash.substring(1));var t=h.get('access_token')||h.get('token');if(t){window.location.href='/callback?token='+encodeURIComponent(t);}}</script><body style='background:#0e0e10;color:#efeff1;font-family:system-ui,sans-serif;text-align:center;padding-top:120px;'><h1 style='color:#a970ff;'>Authenticating...</h1></body></html>";
 
-    for _ in 0..10 {
+    for _ in 0..attempts {
         let (mut socket, _) = listener.accept().await.map_err(|e| e.to_string())?;
         let mut buf = [0; 8192];
         let n = socket.read(&mut buf).await.map_err(|e| e.to_string())?;
@@ -209,14 +209,14 @@ pub async fn login_twitch(eng: &EngineHandle, channel: &str, cfg: &ChatConfig) -
         "https://id.twitch.tv/oauth2/authorize?client_id={}&redirect_uri={}&response_type=token&scope={}",
         client_id, redirect_uri(cfg.oauth_redirect_port), "user:read+chat:read+chat:edit"
     );
-    let raw = capture_auth_redirect(&auth_url, cfg.oauth_redirect_port).await?;
+    let raw = capture_auth_redirect(&auth_url, cfg.oauth_redirect_port, cfg.oauth_listener_attempts).await?;
     let token = raw.trim_start_matches("oauth:").to_string();
 
     let client = reqwest::Client::new();
     let val: serde_json::Value = client
         .get("https://id.twitch.tv/oauth2/validate")
         .header("Authorization", format!("OAuth {}", token))
-        .timeout(Duration::from_secs(20))
+        .timeout(Duration::from_secs(cfg.login_http_timeout_secs))
         .send()
         .await
         .map_err(|e| format!("twitch validate failed: {}", e))?
@@ -240,7 +240,7 @@ pub async fn login_twitch(eng: &EngineHandle, channel: &str, cfg: &ChatConfig) -
             .query(&[("login", channel)])
             .header("Authorization", format!("Bearer {}", token))
             .header("Client-Id", &client_id)
-            .timeout(Duration::from_secs(20))
+            .timeout(Duration::from_secs(cfg.login_http_timeout_secs))
             .send()
             .await
             .map_err(|e| format!("twitch users failed: {}", e))?
@@ -262,7 +262,7 @@ pub async fn login_twitch(eng: &EngineHandle, channel: &str, cfg: &ChatConfig) -
         .get("https://api.twitch.tv/helix/moderation/channels")
         .header("Authorization", format!("Bearer {}", token))
         .header("Client-Id", &client_id)
-        .timeout(Duration::from_secs(20))
+        .timeout(Duration::from_secs(cfg.login_http_timeout_secs))
         .send()
         .await
         .map_err(|e| format!("twitch moderated channels failed: {}", e))?
@@ -304,6 +304,7 @@ async fn kick_channel_resolves_to_token(
     client: &reqwest::Client,
     typed_handle: &str,
     token_user_id: Option<&str>,
+    timeout_secs: u64,
 ) -> bool {
     let Some(token_id) = token_user_id else {
         return false;
@@ -311,7 +312,7 @@ async fn kick_channel_resolves_to_token(
     let Ok(resp) = client
         .get("https://api.kick.com/public/v1/channels")
         .query(&[("slug", typed_handle)])
-        .timeout(Duration::from_secs(20))
+        .timeout(Duration::from_secs(timeout_secs))
         .send()
         .await
     else {
@@ -344,7 +345,7 @@ pub async fn login_kick(eng: &EngineHandle, fallback_handle: &str, cfg: &ChatCon
         "https://id.kick.com/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope={}&code_challenge={}&code_challenge_method=S256&state={}",
         client_id, redirect_uri(cfg.oauth_redirect_port), "user:read+chat:write+moderation:ban", challenge, random_string(16)
     );
-    let code = capture_auth_redirect(&auth_url, cfg.oauth_redirect_port).await?;
+    let code = capture_auth_redirect(&auth_url, cfg.oauth_redirect_port, cfg.oauth_listener_attempts).await?;
 
     let client = reqwest::Client::new();
     let tok: serde_json::Value = client
@@ -357,7 +358,7 @@ pub async fn login_kick(eng: &EngineHandle, fallback_handle: &str, cfg: &ChatCon
             ("redirect_uri", redirect_uri(cfg.oauth_redirect_port).as_str()),
             ("code_verifier", verifier.as_str()),
         ])
-        .timeout(Duration::from_secs(20))
+        .timeout(Duration::from_secs(cfg.login_http_timeout_secs))
         .send()
         .await
         .map_err(|e| format!("kick token failed: {}", e))?
@@ -391,7 +392,7 @@ pub async fn login_kick(eng: &EngineHandle, fallback_handle: &str, cfg: &ChatCon
     if let Ok(resp) = client
         .get("https://api.kick.com/public/v1/users")
         .header("Authorization", format!("Bearer {}", access))
-        .timeout(Duration::from_secs(20))
+        .timeout(Duration::from_secs(cfg.login_http_timeout_secs))
         .send()
         .await
     {
@@ -414,7 +415,8 @@ pub async fn login_kick(eng: &EngineHandle, fallback_handle: &str, cfg: &ChatCon
         let typed = fallback_handle.trim();
         let matches_self = !token_username.is_empty() && token_username.eq_ignore_ascii_case(typed);
         let resolves_to_token =
-            kick_channel_resolves_to_token(&client, typed, token_user_id.as_deref()).await;
+            kick_channel_resolves_to_token(&client, typed, token_user_id.as_deref(), cfg.login_http_timeout_secs)
+                .await;
         if matches_self || resolves_to_token {
             if token_username.is_empty() {
                 typed.to_string()
@@ -454,7 +456,7 @@ pub async fn login_youtube(eng: &EngineHandle, cfg: &ChatConfig) -> Result<Login
         "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope={}&access_type=offline",
         cfg.google_oauth_client_id, redirect_uri(cfg.oauth_redirect_port), scope
     );
-    let code = capture_auth_redirect(&auth_url, cfg.oauth_redirect_port).await?;
+    let code = capture_auth_redirect(&auth_url, cfg.oauth_redirect_port, cfg.oauth_listener_attempts).await?;
 
     let client = reqwest::Client::new();
     let tok: serde_json::Value = client
@@ -466,7 +468,7 @@ pub async fn login_youtube(eng: &EngineHandle, cfg: &ChatConfig) -> Result<Login
             ("redirect_uri", redirect_uri(cfg.oauth_redirect_port).as_str()),
             ("grant_type", "authorization_code"),
         ])
-        .timeout(Duration::from_secs(20))
+        .timeout(Duration::from_secs(cfg.login_http_timeout_secs))
         .send()
         .await
         .map_err(|e| format!("google token failed: {}", e))?
@@ -484,7 +486,7 @@ pub async fn login_youtube(eng: &EngineHandle, cfg: &ChatConfig) -> Result<Login
         .get("https://www.googleapis.com/youtube/v3/channels")
         .query(&[("part", "id,snippet"), ("mine", "true")])
         .header("Authorization", format!("Bearer {}", access))
-        .timeout(Duration::from_secs(20))
+        .timeout(Duration::from_secs(cfg.login_http_timeout_secs))
         .send()
         .await
         .map_err(|e| format!("youtube channels failed: {}", e))?

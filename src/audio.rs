@@ -12,17 +12,41 @@ use std::time::Duration;
 /// message's audio. This type serializes fetch+enqueue so only one audio query
 /// is in flight at a time, and dedups so a uuid that was already fetched/played
 /// is never refetched (engine re-deliveries / recovery re-queues).
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct AudioFetcher {
     inner: Arc<AudioFetcherInner>,
 }
 
-#[derive(Default)]
+impl AudioFetcher {
+    /// Serializes fetch + enqueue so concurrent fetches can't cross-match.
+    /// Records the message uuid7s whose audio has already been fetched/played.
+    pub fn with_retries(retries: u32, retry_delay_ms: u64) -> Self {
+        Self {
+            inner: Arc::new(AudioFetcherInner {
+                gate: tokio::sync::Mutex::new(()),
+                fetched: std::sync::Mutex::new(HashSet::new()),
+                retries: retries.max(1),
+                retry_delay: Duration::from_millis(retry_delay_ms),
+            }),
+        }
+    }
+}
+
+impl Default for AudioFetcher {
+    fn default() -> Self {
+        Self::with_retries(3, 800)
+    }
+}
+
 struct AudioFetcherInner {
     /// Serializes fetch + enqueue so concurrent fetches can't cross-match.
     gate: tokio::sync::Mutex<()>,
     /// Message uuid7s whose audio has already been fetched/played.
     fetched: std::sync::Mutex<HashSet<String>>,
+    /// Fetch attempts before giving up on a TTS clip.
+    retries: u32,
+    /// Delay between fetch attempts.
+    retry_delay: Duration,
 }
 
 impl AudioFetcher {
@@ -74,9 +98,9 @@ impl AudioFetcher {
         if self.already_fetched(uuid7) {
             return; // fetched by the task we were waiting on
         }
-        for attempt in 0..3 {
+        for attempt in 0..self.inner.retries {
             if attempt > 0 {
-                tokio::time::sleep(Duration::from_millis(800)).await;
+                tokio::time::sleep(self.inner.retry_delay).await;
             }
             let sql = serde_json::json!({ "uuid7": uuid7 }).to_string();
             if let Ok(res) = engine.db_query("audio_for_message", &sql).await {

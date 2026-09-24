@@ -303,6 +303,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cockatiel.config.module_name.clone(),
         cockatiel.instance_uuid7.clone(),
         write,
+        config.query_broadcast_cap,
+        Duration::from_secs(config.db_query_timeout_secs),
     );
     // Shared so the read task can swap in a fresh handle on reconnect while the
     // TUI keeps sending through the CURRENT connection.
@@ -313,18 +315,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.easing_enabled,
         config.easing_target_per_min,
         config.max_buffered,
+        config.easing_idle_flush_secs,
     )));
     let status: Arc<Mutex<AppStatus>> = Arc::new(Mutex::new(AppStatus::default()));
     let renderer = Arc::new(ImageRenderer::new(
         config.ascii_converter_path.clone(),
         config.ascii_width,
         config.image_referer.clone(),
+        config.image_max_bytes,
+        config.image_max_concurrent,
+        config.image_timeout_secs,
+        config.image_cache_multiplier,
+        config.image_cache_min,
+        config.image_fit_fraction,
     ));
     let image_map: Arc<HashMap<String, String>> =
         Arc::new(images::load_map(&config.image_map_path));
     let image_regexes: Arc<HashMap<String, Regex>> =
         Arc::new(images::compile_map_regexes(image_map.as_ref()));
-    let audio_fetcher = audio::AudioFetcher::default();
+    let audio_fetcher =
+        audio::AudioFetcher::with_retries(config.audio_fetch_retries, config.audio_fetch_retry_delay_ms);
 
     // Read task: engine -> UI, with automatic reconnect (exponential backoff).
     {
@@ -338,11 +348,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let play_audio = config.play_audio;
         let audio_volume = config.audio_volume;
         let max_audio_seconds = config.max_audio_seconds;
+        let reconnect_base = Duration::from_secs(config.reconnect_base_secs);
+        let reconnect_max = Duration::from_secs(config.reconnect_max_secs);
+        let broadcast_cap = config.query_broadcast_cap;
+        let db_query_timeout = Duration::from_secs(config.db_query_timeout_secs);
         let audio_fetcher = audio_fetcher.clone();
         let engine_state = Arc::clone(&engine_state);
         tokio::spawn(async move {
             let mut read: Option<_> = Some(read);
-            let mut backoff = Duration::from_secs(1);
+            let mut backoff = reconnect_base;
             loop {
                 // The CURRENT engine handle (the read task is the only one that
                 // swaps it; the TUI sends through it too).
@@ -367,17 +381,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 client.config.module_name.clone(),
                                 client.instance_uuid7,
                                 write,
+                                broadcast_cap,
+                                db_query_timeout,
                             );
                             *engine_state.write().await = new_engine.clone();
                             read = Some(new_read);
-                            backoff = Duration::from_secs(1);
+                            backoff = reconnect_base;
                             let mut status_guard = status.lock().await;
                             status_guard.connected = true;
                             status_guard.detail = "connected to cockatiel engine".to_string();
                         }
                         Err(e) => {
                             warn!("[engine] reconnect failed: {}", e);
-                            backoff = (backoff * 2).min(Duration::from_secs(30));
+                            backoff = (backoff * 2).min(reconnect_max);
                         }
                     }
                     continue;
@@ -617,7 +633,7 @@ async fn run_tui(
             let before = msgs.len();
             msgs.retain(|m| {
                 let age = fade_now.saturating_duration_since(m.added_at);
-                fade_action(age, config.message_fade_secs, mode) != FadeAction::Remove
+                fade_action(age, config.message_fade_secs, mode, config.fade_dim_fraction, config.fade_dim_max_secs) != FadeAction::Remove
             });
             if msgs.len() != before {
                 ui.scroll = ui.scroll.min(msgs.len());
@@ -666,10 +682,10 @@ async fn handle_event(
             match m.kind {
                 crossterm::event::MouseEventKind::ScrollUp => {
                     let len = messages.lock().await.len();
-                    ui.scroll = (ui.scroll + 3).min(len);
+                    ui.scroll = (ui.scroll + config.scroll_step).min(len);
                 }
                 crossterm::event::MouseEventKind::ScrollDown => {
-                    ui.scroll = ui.scroll.saturating_sub(3);
+                    ui.scroll = ui.scroll.saturating_sub(config.scroll_step);
                 }
                 _ => {}
             }
@@ -808,7 +824,7 @@ async fn handle_key(
                 ui.timeout_draft.pop();
             }
             KeyCode::Enter => {
-                let secs: i64 = ui.timeout_draft.parse().unwrap_or(300);
+                let secs: i64 = ui.timeout_draft.parse().unwrap_or(config.default_timeout_secs);
                 send_mod_action(engine, ui, login, "mod_timeout", Some(secs)).await;
                 ui.mode = UiMode::Chat;
             }

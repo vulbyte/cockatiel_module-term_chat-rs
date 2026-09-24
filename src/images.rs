@@ -7,13 +7,6 @@ use std::time::Duration;
 use regex::Regex;
 use tokio::sync::{Mutex, Semaphore};
 
-/// Hard cap on a single downloaded image's bytes (10 MB).
-const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
-/// Max concurrent image downloads (bounds memory under a fast chat).
-const MAX_CONCURRENT_DOWNLOADS: usize = 8;
-/// Per-download HTTP timeout.
-const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15);
-
 /// The raw image-URL pattern is fixed; compile it once instead of per message.
 fn image_url_regex() -> &'static Regex {
     static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
@@ -127,16 +120,42 @@ pub struct ImageRenderer {
     cache: Cache,
     /// Bounds concurrent downloads (memory safety under a fast chat).
     download_semaphore: Arc<Semaphore>,
+    /// Hard cap on a single downloaded image's bytes.
+    max_image_bytes: usize,
+    /// Per-download HTTP timeout.
+    timeout: Duration,
+    /// Cache eviction bound: multiplier × visible chat height.
+    cache_multiplier: usize,
+    /// Cache eviction floor.
+    cache_min: usize,
+    /// Fraction of the terminal an embedded image may occupy.
+    fit_fraction: f64,
 }
 
 impl ImageRenderer {
-    pub fn new(converter_path: String, width: usize, referer: String) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        converter_path: String,
+        width: usize,
+        referer: String,
+        max_image_bytes: usize,
+        max_concurrent: usize,
+        timeout_secs: u64,
+        cache_multiplier: usize,
+        cache_min: usize,
+        fit_fraction: f64,
+    ) -> Self {
         Self {
             converter_path,
             width,
             referer,
             cache: Arc::new(Mutex::new(ImageCache::default())),
-            download_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_DOWNLOADS)),
+            download_semaphore: Arc::new(Semaphore::new(max_concurrent)),
+            max_image_bytes,
+            timeout: Duration::from_secs(timeout_secs),
+            cache_multiplier,
+            cache_min,
+            fit_fraction,
         }
     }
 
@@ -157,8 +176,8 @@ impl ImageRenderer {
         let mut cache = self.cache.lock().await;
         cache.map.insert(cache_key.clone(), result.clone());
         cache.order.push_back(cache_key);
-        // Evict the oldest entries past ~4× the visible chat height.
-        let max = (4 * rows as usize).max(8);
+        // Evict the oldest entries past ~multiplier× the visible chat height.
+        let max = (self.cache_multiplier * rows as usize).max(self.cache_min);
         while cache.order.len() > max {
             if let Some(old) = cache.order.pop_front() {
                 cache.map.remove(&old);
@@ -185,7 +204,7 @@ impl ImageRenderer {
         if !self.referer.is_empty() {
             req = req.header("Referer", self.referer.as_str());
         }
-        let resp = match req.timeout(DOWNLOAD_TIMEOUT).send().await {
+        let resp = match req.timeout(self.timeout).send().await {
             Ok(r) => r,
             Err(_) => return RenderResult::Reason("download failed".to_string()),
         };
@@ -219,7 +238,7 @@ impl ImageRenderer {
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse::<usize>().ok())
         {
-            if cl > MAX_IMAGE_BYTES {
+            if cl > self.max_image_bytes {
                 return RenderResult::Reason("image too large".to_string());
             }
         }
@@ -231,7 +250,7 @@ impl ImageRenderer {
         if bytes.is_empty() {
             return RenderResult::Reason("download failed".to_string());
         }
-        if bytes.len() > MAX_IMAGE_BYTES {
+        if bytes.len() > self.max_image_bytes {
             return RenderResult::Reason("image too large".to_string());
         }
         drop(permit); // download done — release before decode/convert
@@ -250,7 +269,7 @@ impl ImageRenderer {
             return RenderResult::Reason("conversion failed".to_string());
         }
 
-        let (out_w, out_h) = fit_dimensions(cols, rows, iw, ih);
+        let (out_w, out_h) = fit_dimensions(cols, rows, iw, ih, self.fit_fraction);
 
         // Prefer the external converter when it's actually installed (nicer
         // output + animated gifs); otherwise use the built-in renderer so the
@@ -311,11 +330,11 @@ impl ImageRenderer {
 }
 
 /// Compute the ascii cell dimensions so the image's longest dimension fits
-/// within ~80% of the terminal (width and height), preserving aspect ratio
-/// (terminal cells are ~2:1 so rows = H/2 in cell units). Never upscales.
-fn fit_dimensions(cols: u16, rows: u16, iw: u32, ih: u32) -> (u32, u32) {
-    let max_w = ((cols as f64 * 0.8) as usize).max(10);
-    let max_h = ((rows as f64 * 0.8) as usize).max(3);
+/// within `fraction` of the terminal (width and height), preserving aspect
+/// ratio (terminal cells are ~2:1 so rows = H/2 in cell units). Never upscales.
+fn fit_dimensions(cols: u16, rows: u16, iw: u32, ih: u32, fraction: f64) -> (u32, u32) {
+    let max_w = ((cols as f64 * fraction) as usize).max(10);
+    let max_h = ((rows as f64 * fraction) as usize).max(3);
     let cell_w = iw as f32;
     let cell_h = ih as f32 / 2.0;
     let scale = (max_w as f32 / cell_w)
@@ -364,26 +383,27 @@ mod tests {
     fn fit_dimensions_tracks_terminal_resize() {
         // 400x400 square: cell = 400 wide x 200 tall.
         // 120x30 terminal -> 0.8 => max 96x24 => scale = min(96/400, 24/200) = 0.12 -> 48x24
-        let (w1, h1) = fit_dimensions(120, 30, 400, 400);
+        let (w1, h1) = fit_dimensions(120, 30, 400, 400, 0.8);
         assert_eq!((w1, h1), (48, 24));
         // Resized to 60x20 -> 0.8 => max 48x16 => scale = min(48/400, 16/200) = 0.08 -> 32x16
-        let (w2, h2) = fit_dimensions(60, 20, 400, 400);
+        let (w2, h2) = fit_dimensions(60, 20, 400, 400, 0.8);
         assert_eq!((w2, h2), (32, 16));
         // A resize must produce a different size (so the cache re-renders).
         assert_ne!((w1, h1), (w2, h2));
 
         // Wide image: width-constrained.
         // 800x200: cell = 800 x 100; at 120x30 -> max 96x24 -> scale = min(96/800, 24/100) = 0.12 -> 96x12
-        assert_eq!(fit_dimensions(120, 30, 800, 200), (96, 12));
+        assert_eq!(fit_dimensions(120, 30, 800, 200, 0.8), (96, 12));
         // Never upscale a tiny image.
         // 40x40: cell = 40 x 20; at 120x30 -> scale would be >1, capped at 1 -> 40x20
-        assert_eq!(fit_dimensions(120, 30, 40, 40), (40, 20));
+        assert_eq!(fit_dimensions(120, 30, 40, 40, 0.8), (40, 20));
     }
 
     #[test]
     fn render_cache_is_keyed_by_terminal_size() {
         // The cache key must include cols x rows so a resize re-renders.
-        let renderer = ImageRenderer::new(String::new(), 60, String::new());
+        let renderer =
+            ImageRenderer::new(String::new(), 60, String::new(), 10 * 1024 * 1024, 8, 15, 4, 8, 0.8);
         // Construct keys the same way `render` does.
         let k1 = format!("{}|{}x{}", "http://x/i.png", 120u16, 30u16);
         let k2 = format!("{}|{}x{}", "http://x/i.png", 60u16, 20u16);

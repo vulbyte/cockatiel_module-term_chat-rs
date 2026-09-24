@@ -77,6 +77,64 @@ pub struct ChatConfig {
     /// Color the rank text (e.g. `(opal)`).
     #[serde(default = "default_true")]
     pub show_rank_color: bool,
+    // Tuning values (all defaulted; created in config.json when missing).
+    /// Audio fetch retries before giving up on a TTS clip.
+    #[serde(default = "default_audio_fetch_retries")]
+    pub audio_fetch_retries: u32,
+    /// Delay between audio fetch retries (ms).
+    #[serde(default = "default_audio_fetch_retry_delay_ms")]
+    pub audio_fetch_retry_delay_ms: u64,
+    /// Hard cap on a single downloaded image's bytes.
+    #[serde(default = "default_image_max_bytes")]
+    pub image_max_bytes: usize,
+    /// Max concurrent image downloads.
+    #[serde(default = "default_image_max_concurrent")]
+    pub image_max_concurrent: usize,
+    /// Per-download HTTP timeout (seconds).
+    #[serde(default = "default_image_timeout_secs")]
+    pub image_timeout_secs: u64,
+    /// Cache eviction bound: ~multiplier × visible chat height.
+    #[serde(default = "default_image_cache_multiplier")]
+    pub image_cache_multiplier: usize,
+    /// Cache eviction floor (entries).
+    #[serde(default = "default_image_cache_min")]
+    pub image_cache_min: usize,
+    /// Fraction of the terminal an embedded image may occupy.
+    #[serde(default = "default_image_fit_fraction")]
+    pub image_fit_fraction: f64,
+    /// Fraction of a message's lifetime used for the dim fade-out window.
+    #[serde(default = "default_fade_dim_fraction")]
+    pub fade_dim_fraction: f64,
+    /// Cap on the dim fade-out window (seconds).
+    #[serde(default = "default_fade_dim_max_secs")]
+    pub fade_dim_max_secs: u64,
+    /// Idle gap (seconds) after which a buffered easing queue flushes.
+    #[serde(default = "default_easing_idle_flush_secs")]
+    pub easing_idle_flush_secs: u64,
+    /// Mouse-wheel scroll step (messages).
+    #[serde(default = "default_scroll_step")]
+    pub scroll_step: usize,
+    /// Deadline for a database query round-trip (seconds).
+    #[serde(default = "default_db_query_timeout_secs")]
+    pub db_query_timeout_secs: u64,
+    /// Capacity of the engine result broadcast channel.
+    #[serde(default = "default_query_broadcast_cap")]
+    pub query_broadcast_cap: usize,
+    /// Default timeout (seconds) when a typed timeout can't be parsed.
+    #[serde(default = "default_default_timeout_secs")]
+    pub default_timeout_secs: i64,
+    /// Initial reconnect backoff (seconds).
+    #[serde(default = "default_reconnect_base_secs")]
+    pub reconnect_base_secs: u64,
+    /// Reconnect backoff cap (seconds).
+    #[serde(default = "default_reconnect_max_secs")]
+    pub reconnect_max_secs: u64,
+    /// HTTP timeout for login API calls (seconds).
+    #[serde(default = "default_login_http_timeout_secs")]
+    pub login_http_timeout_secs: u64,
+    /// How many loopback redirect connections the OAuth listener accepts.
+    #[serde(default = "default_oauth_listener_attempts")]
+    pub oauth_listener_attempts: u32,
 }
 
 fn default_true() -> bool {
@@ -101,6 +159,82 @@ fn default_message_fade_mode() -> String {
 
 fn default_oauth_redirect_port() -> u16 {
     3000
+}
+
+fn default_audio_fetch_retries() -> u32 {
+    3
+}
+
+fn default_audio_fetch_retry_delay_ms() -> u64 {
+    800
+}
+
+fn default_image_max_bytes() -> usize {
+    10 * 1024 * 1024
+}
+
+fn default_image_max_concurrent() -> usize {
+    8
+}
+
+fn default_image_timeout_secs() -> u64 {
+    15
+}
+
+fn default_image_cache_multiplier() -> usize {
+    4
+}
+
+fn default_image_cache_min() -> usize {
+    8
+}
+
+fn default_image_fit_fraction() -> f64 {
+    0.8
+}
+
+fn default_fade_dim_fraction() -> f64 {
+    0.2
+}
+
+fn default_fade_dim_max_secs() -> u64 {
+    2
+}
+
+fn default_easing_idle_flush_secs() -> u64 {
+    2
+}
+
+fn default_scroll_step() -> usize {
+    3
+}
+
+fn default_db_query_timeout_secs() -> u64 {
+    10
+}
+
+fn default_query_broadcast_cap() -> usize {
+    256
+}
+
+fn default_default_timeout_secs() -> i64 {
+    300
+}
+
+fn default_reconnect_base_secs() -> u64 {
+    1
+}
+
+fn default_reconnect_max_secs() -> u64 {
+    30
+}
+
+fn default_login_http_timeout_secs() -> u64 {
+    20
+}
+
+fn default_oauth_listener_attempts() -> u32 {
+    10
 }
 
 impl Default for ChatConfig {
@@ -134,6 +268,25 @@ impl Default for ChatConfig {
             show_reprimand: true,
             show_status_color: true,
             show_rank_color: true,
+            audio_fetch_retries: 3,
+            audio_fetch_retry_delay_ms: 800,
+            image_max_bytes: 10 * 1024 * 1024,
+            image_max_concurrent: 8,
+            image_timeout_secs: 15,
+            image_cache_multiplier: 4,
+            image_cache_min: 8,
+            image_fit_fraction: 0.8,
+            fade_dim_fraction: 0.2,
+            fade_dim_max_secs: 2,
+            easing_idle_flush_secs: 2,
+            scroll_step: 3,
+            db_query_timeout_secs: 10,
+            query_broadcast_cap: 256,
+            default_timeout_secs: 300,
+            reconnect_base_secs: 1,
+            reconnect_max_secs: 30,
+            login_http_timeout_secs: 20,
+            oauth_listener_attempts: 10,
         }
     }
 }
@@ -160,10 +313,36 @@ impl ChatConfig {
                 if let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&data) {
                     let mut changed = false;
                     if let Some(obj) = root.as_object_mut() {
-                        for key in ["show_reprimand", "show_status_color", "show_rank_color"] {
-                            if !obj.contains_key(key) {
-                                obj.insert(key.to_string(), serde_json::json!(true));
-                                changed = true;
+                        let defaults = serde_json::json!({
+                            "show_reprimand": true,
+                            "show_status_color": true,
+                            "show_rank_color": true,
+                            "audio_fetch_retries": 3,
+                            "audio_fetch_retry_delay_ms": 800,
+                            "image_max_bytes": 10 * 1024 * 1024,
+                            "image_max_concurrent": 8,
+                            "image_timeout_secs": 15,
+                            "image_cache_multiplier": 4,
+                            "image_cache_min": 8,
+                            "image_fit_fraction": 0.8,
+                            "fade_dim_fraction": 0.2,
+                            "fade_dim_max_secs": 2,
+                            "easing_idle_flush_secs": 2,
+                            "scroll_step": 3,
+                            "db_query_timeout_secs": 10,
+                            "query_broadcast_cap": 256,
+                            "default_timeout_secs": 300,
+                            "reconnect_base_secs": 1,
+                            "reconnect_max_secs": 30,
+                            "login_http_timeout_secs": 20,
+                            "oauth_listener_attempts": 10,
+                        });
+                        if let Some(d) = defaults.as_object() {
+                            for (key, value) in d {
+                                if !obj.contains_key(key) {
+                                    obj.insert(key.clone(), value.clone());
+                                    changed = true;
+                                }
                             }
                         }
                     }

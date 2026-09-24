@@ -12,12 +12,13 @@ pub struct EasingQueue {
     pub enabled: bool,
     pub target_per_min: f64,
     max_buffered: usize,
+    idle_flush: Duration,
     last_emit: Option<Instant>,
     buffer: VecDeque<ChatMessageItem>,
 }
 
 impl EasingQueue {
-    pub fn new(enabled: bool, target_per_min: f64, max_buffered: usize) -> Self {
+    pub fn new(enabled: bool, target_per_min: f64, max_buffered: usize, idle_flush_secs: u64) -> Self {
         Self {
             enabled,
             target_per_min: if target_per_min > 0.0 {
@@ -26,6 +27,7 @@ impl EasingQueue {
                 120.0
             },
             max_buffered: max_buffered.max(1),
+            idle_flush: Duration::from_secs(idle_flush_secs),
             last_emit: None,
             buffer: VecDeque::new(),
         }
@@ -66,7 +68,7 @@ impl EasingQueue {
                 out.push(item);
             }
             self.last_emit = Some(now);
-        } else if since > Duration::from_secs(2) {
+        } else if since > self.idle_flush {
             // Idle long enough — flush the whole buffer so the chat feels live.
             out.extend(self.buffer.drain(..));
             self.last_emit = Some(now);
@@ -102,7 +104,7 @@ mod tests {
 
     #[test]
     fn push_drops_oldest_when_buffer_over_cap() {
-        let mut q = EasingQueue::new(true, 30.0, 3);
+        let mut q = EasingQueue::new(true, 30.0, 3, 2);
         for i in 0..10 {
             q.push(item(&format!("m{}", i)));
         }
@@ -117,7 +119,7 @@ mod tests {
 
     #[test]
     fn contains_id_sees_pending_entries() {
-        let mut q = EasingQueue::new(true, 30.0, 10);
+        let mut q = EasingQueue::new(true, 30.0, 10, 2);
         q.push(item("m1"));
         assert!(q.contains_id("m1"));
         assert!(!q.contains_id("m2"));

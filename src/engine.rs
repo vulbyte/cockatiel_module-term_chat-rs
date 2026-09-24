@@ -26,6 +26,7 @@ pub struct EngineHandle {
     pub instance_uuid7: String,
     write: Arc<Mutex<WsSink>>,
     results: broadcast::Sender<DatabaseQueryResult>,
+    db_query_timeout: Duration,
 }
 
 pub const CHAT_VERIFY_QUERY: &str = "chat_verify_identity";
@@ -36,14 +37,17 @@ impl EngineHandle {
         module_name: String,
         instance_uuid7: String,
         write: WsSink,
+        broadcast_cap: usize,
+        db_query_timeout: Duration,
     ) -> Self {
-        let (results, _) = broadcast::channel(256);
+        let (results, _) = broadcast::channel(broadcast_cap);
         Self {
             auth_token,
             module_name,
             instance_uuid7,
             write: Arc::new(Mutex::new(write)),
             results,
+            db_query_timeout,
         }
     }
 
@@ -80,7 +84,7 @@ impl EngineHandle {
         }))
         .await?;
 
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let deadline = tokio::time::Instant::now() + self.db_query_timeout;
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
