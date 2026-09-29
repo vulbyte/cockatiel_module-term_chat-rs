@@ -31,5 +31,7 @@
   "name": "term-chat",
   "root_file": "./src/main.rs",
   "terminal": true,
-  "version": "0.2.0"
+  "version": "0.2.0",
+  "price": 0,
+  "min_rank": 0
 }
