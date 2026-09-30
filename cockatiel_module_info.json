@@ -27,11 +27,11 @@
   "command_flags": [
     "--release"
   ],
-  "credentials": [
+"credentials": [
     {
-      "key": "terminal_emulator",
-      "label": "Terminal Emulator for the chat window (empty = system default; macOS: app name e.g. iTerm, Linux: executable e.g. kitty)",
-      "list": false,
+      "key": "terminal_emulators",
+      "label": "Terminal emulators (toggle true/false; first enabled wins — discovered automatically)",
+      "list": true,
       "sensitive": false,
       "optional": true
     }
