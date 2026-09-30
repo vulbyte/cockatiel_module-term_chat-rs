@@ -27,13 +27,13 @@
   "command_flags": [
     "--release"
   ],
-"credentials": [
+  "credentials": [
     {
       "key": "terminal_emulators",
       "label": "Terminal emulators (toggle true/false; first enabled wins — discovered automatically)",
       "list": true,
-      "sensitive": false,
-      "optional": true
+      "optional": true,
+      "sensitive": false
     }
   ],
   "description": "terminal chat display with mod tools (login via platform to unlock send/mod actions)",
