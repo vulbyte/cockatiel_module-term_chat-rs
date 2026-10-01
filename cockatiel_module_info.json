@@ -25,19 +25,20 @@
   ],
   "capabilities": "output",
   "command_flags": [
+    "run",
     "--release"
   ],
   "credentials": [
     {
       "key": "terminal_emulators",
-      "label": "Terminal emulators (toggle true/false; first enabled wins — discovered automatically)",
+      "label": "Terminal emulators (toggle true/false; first enabled wins \u2014 discovered automatically)",
       "list": true,
       "optional": true,
       "sensitive": false
     }
   ],
   "description": "terminal chat display with mod tools (login via platform to unlock send/mod actions)",
-  "launch_command": "cargo run",
+  "launch_command": "cargo",
   "min_rank": 0,
   "name": "term-chat",
   "price": 0,
