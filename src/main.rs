@@ -24,7 +24,9 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 use tracing::{warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
-use cockatiel_client::proto::container::Payload;
+use cockatiel_client::proto::container_for_engine::Payload as EnginePayload;
+use cockatiel_client::proto::container_for_module::Payload as ModulePayload;
+use cockatiel_client::proto::*;
 use futures_util::StreamExt;
 use prost::Message as ProstMessage;
 use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
@@ -39,14 +41,14 @@ use render::Ui;
 use types::{AppStatus, ChatMessageItem, UiMode};
 
 fn build_message_item(
-    payload: &Payload,
+    payload: &ModulePayload,
     emoji_map: &HashMap<String, String>,
     emoji_regexes: &HashMap<String, Regex>,
     emoji_enabled: bool,
 ) -> Option<ChatMessageItem> {
     let (platform, content, username, name_color, rank, score, reprimanded, role_badges, user_handle, user_uuid7, message_uuid7, stage) =
         match payload {
-            Payload::MessagePostProcess(pp) => {
+            ModulePayload::MessagePostProcess(pp) => {
                 let raw = pp.raw_message.as_ref();
                 let user_data = raw.and_then(|cm| cm.user_data.as_ref());
                 let username = user_data
@@ -93,7 +95,7 @@ fn build_message_item(
                     "post",
                 )
             }
-            Payload::MessagePreProcess(pre) => {
+            ModulePayload::MessagePreProcess(pre) => {
                 let raw = pre.raw_message.as_ref();
                 let user_data = raw.and_then(|cm| cm.user_data.as_ref());
                 let username = user_data
@@ -416,8 +418,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         read = None;
                     }
                     Some(Ok(WsMessage::Binary(data))) => {
-                        let Ok(container) =
-                            cockatiel_client::proto::Container::decode(data.as_ref())
+                        let Ok(container) = ContainerForModule::decode(data.as_ref())
                         else {
                             continue;
                         };
@@ -425,9 +426,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             continue;
                         };
                         // Answer the engine's liveness probe with our auth token.
-                        if let Payload::AuthVerify(_) = &payload {
+                        if let ModulePayload::AuthVerify(_) = &payload {
                             let _ = engine
-                                .send_payload(Payload::AuthVerify(
+                                .send_payload(EnginePayload::AuthVerify(
                                     cockatiel_client::proto::AuthVerify {
                                         cur_auth: engine.auth_token.clone(),
                                     },
@@ -438,13 +439,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // Acknowledge pipeline messages so the engine advances the
                         // chain immediately instead of waiting out the ack timeout.
                         let ack_uuid: Option<String> = match &payload {
-                            Payload::MessagePreProcess(m) => {
+                            ModulePayload::MessagePreProcess(m) => {
                                 if m.message_uuid7.is_empty() { None } else { Some(m.message_uuid7.clone()) }
                             }
-                            Payload::MessageInProcess(m) => {
+                            ModulePayload::MessageInProcess(m) => {
                                 if m.message_uuid7.is_empty() { None } else { Some(m.message_uuid7.clone()) }
                             }
-                            Payload::MessagePostProcess(m) => {
+                            ModulePayload::MessagePostProcess(m) => {
                                 if m.message_uuid7.is_empty() { None } else { Some(m.message_uuid7.clone()) }
                             }
                             _ => None,
@@ -454,7 +455,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
 
                         match payload {
-                            Payload::DatabaseQueryResult(qr) => {
+                            ModulePayload::DatabaseQueryResult(qr) => {
                                 let _ = engine.result_sender().send(qr);
                             }
                             // term-chat is a display-only module, NOT an
@@ -462,7 +463,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // deliberately ignored here so they never interrupt
                             // the chat stream — the TUI is the interface that
                             // answers them.
-                            Payload::Prompt(_) => {}
+                            ModulePayload::Prompt(_) => {}
                             other => {
                                 if let Some(item) =
                                     build_message_item(&other, &emoji_map, &emoji_regexes, emoji_enabled)
@@ -487,7 +488,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 // audio created at the post-process stage is
                                 // saved to the timeline and fetched here.
                                 if play_audio {
-                                    if let Payload::MessagePostProcess(pp) = &other {
+                                    if let ModulePayload::MessagePostProcess(pp) = &other {
                                         if !pp.audio.is_empty() {
                                             audio_fetcher.play_inline(
                                                 &pp.message_uuid7,

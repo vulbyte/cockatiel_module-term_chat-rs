@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, Mutex};
 
-use cockatiel_client::proto::container::Payload;
+use cockatiel_client::proto::container_for_engine::Payload as EnginePayload;
 use cockatiel_client::proto::*;
 use futures_util::SinkExt;
 use prost::Message as ProstMessage;
@@ -55,9 +55,9 @@ impl EngineHandle {
         self.results.clone()
     }
 
-    pub async fn send_payload(&self, payload: Payload) -> Result<(), String> {
-        let container = Container {
-            version: 1,
+    pub async fn send_payload(&self, payload: EnginePayload) -> Result<(), String> {
+        let container = ContainerForEngine {
+            version: 2,
             auth_token: self.auth_token.clone(),
             module_name: self.module_name.clone(),
             module_instance_uuid7: self.instance_uuid7.clone(),
@@ -77,7 +77,7 @@ impl EngineHandle {
     /// Send a DatabaseQuery and wait for its matching DatabaseQueryResult.
     pub async fn db_query(&self, query_id: &str, sql: &str) -> Result<DatabaseQueryResult, String> {
         let mut rx = self.results.subscribe();
-        self.send_payload(Payload::DatabaseQuery(DatabaseQuery {
+        self.send_payload(EnginePayload::DatabaseQuery(DatabaseQuery {
             query_id: query_id.to_string(),
             sql: sql.to_string(),
             params: vec![],
@@ -108,7 +108,7 @@ impl EngineHandle {
         if message_uuid7.is_empty() {
             return Ok(());
         }
-        self.send_payload(Payload::MessageAck(MessageAck {
+        self.send_payload(EnginePayload::MessageAck(MessageAck {
             message_uuid7: message_uuid7.to_string(),
         }))
         .await
@@ -157,7 +157,7 @@ impl EngineHandle {
         actor: Option<(&str, &str)>,
     ) -> Result<(), String> {
         let (actor_platform, actor_handle) = actor.unwrap_or(("", ""));
-        self.send_payload(Payload::SendToPlatforms(SendToPlatforms {
+        self.send_payload(EnginePayload::SendToPlatforms(SendToPlatforms {
             msg: msg.to_string(),
             level: PlatformSendLevel::All as i32,
             module_uuid7: String::new(),
