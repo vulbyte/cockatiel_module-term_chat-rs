@@ -89,7 +89,7 @@ mod tests {
             username: String::new(),
             name_color: String::new(),
             rank: String::new(),
-            score: 0,
+            rank_value: 0.0,
             role_badges: String::new(),
             reprimanded: false,
             platform: String::new(),

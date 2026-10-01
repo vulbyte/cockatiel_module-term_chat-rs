@@ -23,14 +23,13 @@ pub struct ChatConfig {
     /// a raw URL in the message.
     #[serde(default = "default_image_map_path")]
     pub image_map_path: String,
-    /// Minimum rank tier allowed to show embedded images (owner/admin/mod/
-    /// sponsor/opal/gold/silver/regular/coal/trash). Users below this show the
-    /// `<image>` placeholder instead. Default "regular" = everyone.
-    ///
-    /// This can ALSO be a numeric score threshold (the user's own trust level),
-    /// e.g. "20" means only users with a user-DB score >= 20 can embed images.
+    /// Minimum numeric rank (0-1) allowed to show embedded images. Users whose
+    /// rank (the user-db's 0-1 value, exposed as `rank_value` by the engine)
+    /// is below this show the `<image>` placeholder instead. Default 0.0 =
+    /// everyone. Numbers are for logic; tier NAMES are a display concern from
+    /// the root `rank_chart.json`.
     #[serde(default = "default_min_rank")]
-    pub image_min_rank: String,
+    pub image_min_rank: f32,
     /// Optional `Referer` header sent when downloading images (some CDNs only
     /// allow embedding when a Referer is present). Empty = no Referer.
     #[serde(default)]
@@ -252,7 +251,7 @@ impl Default for ChatConfig {
             ascii_converter_path: "ascii-image-converter".to_string(),
             ascii_width: 60,
             image_map_path: "image_map.json".to_string(),
-            image_min_rank: "regular".to_string(),
+            image_min_rank: 0.0,
             image_referer: String::new(),
             emoji_enabled: true,
             emoji_map_path: "emoji_map.json".to_string(),
@@ -295,8 +294,8 @@ fn default_image_map_path() -> String {
     "image_map.json".to_string()
 }
 
-fn default_min_rank() -> String {
-    "regular".to_string()
+fn default_min_rank() -> f32 {
+    0.0
 }
 
 impl ChatConfig {
@@ -381,7 +380,7 @@ mod tests {
         "google_oauth_client_id": "",
         "google_oauth_client_secret": "",
         "image_map_path": "image_map.json",
-        "image_min_rank": "regular",
+        "image_min_rank": 0.0,
         "image_referer": ""
     }"#;
 

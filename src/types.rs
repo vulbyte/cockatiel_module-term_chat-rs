@@ -6,9 +6,10 @@ pub struct ChatMessageItem {
     pub username: String,
     pub name_color: String,
     pub rank: String,
-    /// Raw user score (when the engine enriched the user); used for custom
-    /// trust-level thresholds (e.g. `image_min_rank` as a number).
-    pub score: i64,
+    /// Numeric 0-1 rank (the engine's `rank_value` css property). Numbers are
+    /// for logic — `image_min_rank` compares against this; `rank` (the name)
+    /// is for display only.
+    pub rank_value: f32,
     pub role_badges: String,
     /// True when the user has been reprimanded (reprimands counter > 0);
     /// drives the compact `R` indicator.

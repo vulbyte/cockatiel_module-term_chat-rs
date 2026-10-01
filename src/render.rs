@@ -450,7 +450,7 @@ mod bracket_tests {
             username: username.into(),
             name_color: String::new(),
             rank: rank.into(),
-            score: 0,
+            rank_value: 0.0,
             role_badges: badges.into(),
             reprimanded,
             platform: "tw".into(),

@@ -46,7 +46,7 @@ fn build_message_item(
     emoji_regexes: &HashMap<String, Regex>,
     emoji_enabled: bool,
 ) -> Option<ChatMessageItem> {
-    let (platform, content, username, name_color, rank, score, reprimanded, role_badges, user_handle, user_uuid7, message_uuid7, stage) =
+    let (platform, content, username, name_color, rank, rank_value, reprimanded, role_badges, user_handle, user_uuid7, message_uuid7, stage) =
         match payload {
             ModulePayload::MessagePostProcess(pp) => {
                 let raw = pp.raw_message.as_ref();
@@ -65,10 +65,10 @@ fn build_message_item(
                     .and_then(|st| st.css_properties.get("rank"))
                     .cloned()
                     .unwrap_or_default();
-                let score = styling
-                    .and_then(|st| st.css_properties.get("score"))
-                    .and_then(|s| s.parse::<i64>().ok())
-                    .unwrap_or(0);
+                let rank_value = styling
+                    .and_then(|st| st.css_properties.get("rank_value"))
+                    .and_then(|s| s.parse::<f32>().ok())
+                    .unwrap_or(0.0);
                 let reprimanded = styling
                     .and_then(|st| st.css_properties.get("reprimands"))
                     .and_then(|s| s.parse::<i64>().ok())
@@ -86,7 +86,7 @@ fn build_message_item(
                     username,
                     name_color,
                     rank,
-                    score,
+                    rank_value,
                     reprimanded,
                     role_badges,
                     raw.map(|cm| cm.user_uuid7.clone()).unwrap_or_default(),
@@ -112,10 +112,10 @@ fn build_message_item(
                     .and_then(|st| st.css_properties.get("rank"))
                     .cloned()
                     .unwrap_or_default();
-                let score = styling
-                    .and_then(|st| st.css_properties.get("score"))
-                    .and_then(|s| s.parse::<i64>().ok())
-                    .unwrap_or(0);
+                let rank_value = styling
+                    .and_then(|st| st.css_properties.get("rank_value"))
+                    .and_then(|s| s.parse::<f32>().ok())
+                    .unwrap_or(0.0);
                 let reprimanded = styling
                     .and_then(|st| st.css_properties.get("reprimands"))
                     .and_then(|s| s.parse::<i64>().ok())
@@ -129,7 +129,7 @@ fn build_message_item(
                     username,
                     name_color,
                     rank,
-                    score,
+                    rank_value,
                     reprimanded,
                     role_badges,
                     raw.map(|cm| cm.user_uuid7.clone()).unwrap_or_default(),
@@ -163,7 +163,7 @@ fn build_message_item(
         username,
         name_color,
         rank,
-        score,
+        rank_value,
         role_badges,
         reprimanded,
         platform,
@@ -209,19 +209,18 @@ fn spawn_image_render(
         return;
     }
     let id = item.id.clone();
-    let min_rank = config.image_min_rank.clone();
+    let min_rank = config.image_min_rank;
 
     tokio::spawn(async move {
-        // Rank gate: only users at or above image_min_rank get embedded images.
-        // The threshold can be a rank name (owner/admin/mod/sponsor/opal/gold/
-        // silver/regular/coal/trash) OR a numeric score (the user's own trust
-        // level, e.g. "20" = only users with score >= 20).
-        if !rank_allows(item.score, &item.rank, &min_rank) {
+        // Rank gate: only users whose numeric 0-1 rank is at or above
+        // image_min_rank get embedded images. Numbers gate; the display NAME
+        // (`item.rank`) never does.
+        if !rank_allows(item.rank_value, min_rank) {
             let mut msgs = messages.lock().await;
             if let Some(m) = msgs.iter_mut().find(|m| m.id == id) {
                 m.image_status = Some("rank too low".to_string());
             }
-            warn!("[image] not embedding for {}: rank '{}' score {} below '{}'", item.username, item.rank, item.score, min_rank);
+            warn!("[image] not embedding for {}: rank '{}' (value {:.3}) below '{}'", item.username, item.rank, item.rank_value, min_rank);
             return;
         }
 
@@ -252,30 +251,11 @@ fn spawn_image_render(
     });
 }
 
-/// Map a rank string to a comparable tier (higher = better).
-fn rank_tier(rank: &str) -> i32 {
-    match rank.to_ascii_lowercase().as_str() {
-        "owner" => 9,
-        "admin" => 8,
-        "mod" | "moderator" => 7,
-        "sponsor" | "sub" => 6,
-        "opal" => 5,
-        "gold" => 4,
-        "silver" => 3,
-        "coal" => 1,
-        "trash" => 0,
-        // "regular" or anything unknown is the baseline.
-        _ => 2,
-    }
-}
-
-/// True when a user (score + rank) is allowed to embed images under `min_rank`,
-/// which may be a rank name or a numeric score threshold.
-fn rank_allows(score: i64, rank: &str, min_rank: &str) -> bool {
-    if let Ok(min_score) = min_rank.trim().parse::<i64>() {
-        return score >= min_score;
-    }
-    rank_tier(rank) >= rank_tier(min_rank)
+/// True when a user is allowed to embed images under `image_min_rank`: their
+/// numeric 0-1 rank (the engine's `rank_value`) must be >= the threshold.
+/// Numbers are for logic; the `rank` display NAME never gates anything.
+fn rank_allows(rank_value: f32, min_rank: f32) -> bool {
+    rank_value >= min_rank
 }
 
 #[tokio::main]
