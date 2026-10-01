@@ -129,7 +129,7 @@ pub struct ImageRenderer {
     /// Cache eviction floor.
     cache_min: usize,
     /// Fraction of the terminal an embedded image may occupy.
-    fit_fraction: f64,
+    fit_fraction: f32,
 }
 
 impl ImageRenderer {
@@ -140,10 +140,10 @@ impl ImageRenderer {
         referer: String,
         max_image_bytes: usize,
         max_concurrent: usize,
-        timeout_secs: u64,
+        timeout_secs: u32,
         cache_multiplier: usize,
         cache_min: usize,
-        fit_fraction: f64,
+        fit_fraction: f32,
     ) -> Self {
         Self {
             converter_path,
@@ -152,7 +152,7 @@ impl ImageRenderer {
             cache: Arc::new(Mutex::new(ImageCache::default())),
             download_semaphore: Arc::new(Semaphore::new(max_concurrent)),
             max_image_bytes,
-            timeout: Duration::from_secs(timeout_secs),
+            timeout: Duration::from_secs(timeout_secs as u64),
             cache_multiplier,
             cache_min,
             fit_fraction,
@@ -332,9 +332,9 @@ impl ImageRenderer {
 /// Compute the ascii cell dimensions so the image's longest dimension fits
 /// within `fraction` of the terminal (width and height), preserving aspect
 /// ratio (terminal cells are ~2:1 so rows = H/2 in cell units). Never upscales.
-fn fit_dimensions(cols: u16, rows: u16, iw: u32, ih: u32, fraction: f64) -> (u32, u32) {
-    let max_w = ((cols as f64 * fraction) as usize).max(10);
-    let max_h = ((rows as f64 * fraction) as usize).max(3);
+fn fit_dimensions(cols: u16, rows: u16, iw: u32, ih: u32, fraction: f32) -> (u32, u32) {
+    let max_w = ((cols as f32 * fraction) as usize).max(10);
+    let max_h = ((rows as f32 * fraction) as usize).max(3);
     let cell_w = iw as f32;
     let cell_h = ih as f32 / 2.0;
     let scale = (max_w as f32 / cell_w)

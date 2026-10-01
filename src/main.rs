@@ -71,7 +71,7 @@ fn build_message_item(
                     .unwrap_or(0.0);
                 let reprimanded = styling
                     .and_then(|st| st.css_properties.get("reprimands"))
-                    .and_then(|s| s.parse::<i64>().ok())
+                    .and_then(|s| s.parse::<i32>().ok())
                     .map(|n| n > 0)
                     .unwrap_or(false);
                 let role_badges = user_data.map(role_badges_of).unwrap_or_default();
@@ -118,7 +118,7 @@ fn build_message_item(
                     .unwrap_or(0.0);
                 let reprimanded = styling
                     .and_then(|st| st.css_properties.get("reprimands"))
-                    .and_then(|s| s.parse::<i64>().ok())
+                    .and_then(|s| s.parse::<i32>().ok())
                     .map(|n| n > 0)
                     .unwrap_or(false);
                 let role_badges = user_data.map(role_badges_of).unwrap_or_default();
@@ -286,7 +286,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cockatiel.instance_uuid7.clone(),
         write,
         config.query_broadcast_cap,
-        Duration::from_secs(config.db_query_timeout_secs),
+        Duration::from_secs(config.db_query_timeout_secs as u64),
     );
     // Shared so the read task can swap in a fresh handle on reconnect while the
     // TUI keeps sending through the CURRENT connection.
@@ -330,10 +330,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let play_audio = config.play_audio;
         let audio_volume = config.audio_volume;
         let max_audio_seconds = config.max_audio_seconds;
-        let reconnect_base = Duration::from_secs(config.reconnect_base_secs);
-        let reconnect_max = Duration::from_secs(config.reconnect_max_secs);
+        let reconnect_base = Duration::from_secs(config.reconnect_base_secs as u64);
+        let reconnect_max = Duration::from_secs(config.reconnect_max_secs as u64);
         let broadcast_cap = config.query_broadcast_cap;
-        let db_query_timeout = Duration::from_secs(config.db_query_timeout_secs);
+        let db_query_timeout = Duration::from_secs(config.db_query_timeout_secs as u64);
         let audio_fetcher = audio_fetcher.clone();
         let engine_state = Arc::clone(&engine_state);
         tokio::spawn(async move {
@@ -805,7 +805,7 @@ async fn handle_key(
                 ui.timeout_draft.pop();
             }
             KeyCode::Enter => {
-                let secs: i64 = ui.timeout_draft.parse().unwrap_or(config.default_timeout_secs);
+                let secs: i32 = ui.timeout_draft.parse().unwrap_or(config.default_timeout_secs);
                 send_mod_action(engine, ui, login, "mod_timeout", Some(secs)).await;
                 ui.mode = UiMode::Chat;
             }
@@ -903,7 +903,7 @@ async fn send_mod_action(
     ui: &mut Ui,
     login: &LoginState,
     query_id: &str,
-    duration_secs: Option<i64>,
+    duration_secs: Option<i32>,
 ) {
     let Some((_username, handle, platform, uuid7)) = ui.action_target.clone() else {
         return;

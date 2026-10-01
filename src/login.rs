@@ -216,7 +216,7 @@ pub async fn login_twitch(eng: &EngineHandle, channel: &str, cfg: &ChatConfig) -
     let val: serde_json::Value = client
         .get("https://id.twitch.tv/oauth2/validate")
         .header("Authorization", format!("OAuth {}", token))
-        .timeout(Duration::from_secs(cfg.login_http_timeout_secs))
+        .timeout(Duration::from_secs(cfg.login_http_timeout_secs as u64))
         .send()
         .await
         .map_err(|e| format!("twitch validate failed: {}", e))?
@@ -240,7 +240,7 @@ pub async fn login_twitch(eng: &EngineHandle, channel: &str, cfg: &ChatConfig) -
             .query(&[("login", channel)])
             .header("Authorization", format!("Bearer {}", token))
             .header("Client-Id", &client_id)
-            .timeout(Duration::from_secs(cfg.login_http_timeout_secs))
+            .timeout(Duration::from_secs(cfg.login_http_timeout_secs as u64))
             .send()
             .await
             .map_err(|e| format!("twitch users failed: {}", e))?
@@ -262,7 +262,7 @@ pub async fn login_twitch(eng: &EngineHandle, channel: &str, cfg: &ChatConfig) -
         .get("https://api.twitch.tv/helix/moderation/channels")
         .header("Authorization", format!("Bearer {}", token))
         .header("Client-Id", &client_id)
-        .timeout(Duration::from_secs(cfg.login_http_timeout_secs))
+        .timeout(Duration::from_secs(cfg.login_http_timeout_secs as u64))
         .send()
         .await
         .map_err(|e| format!("twitch moderated channels failed: {}", e))?
@@ -304,7 +304,7 @@ async fn kick_channel_resolves_to_token(
     client: &reqwest::Client,
     typed_handle: &str,
     token_user_id: Option<&str>,
-    timeout_secs: u64,
+    timeout_secs: u32,
 ) -> bool {
     let Some(token_id) = token_user_id else {
         return false;
@@ -312,7 +312,7 @@ async fn kick_channel_resolves_to_token(
     let Ok(resp) = client
         .get("https://api.kick.com/public/v1/channels")
         .query(&[("slug", typed_handle)])
-        .timeout(Duration::from_secs(timeout_secs))
+        .timeout(Duration::from_secs(timeout_secs as u64))
         .send()
         .await
     else {
@@ -358,7 +358,7 @@ pub async fn login_kick(eng: &EngineHandle, fallback_handle: &str, cfg: &ChatCon
             ("redirect_uri", redirect_uri(cfg.oauth_redirect_port).as_str()),
             ("code_verifier", verifier.as_str()),
         ])
-        .timeout(Duration::from_secs(cfg.login_http_timeout_secs))
+        .timeout(Duration::from_secs(cfg.login_http_timeout_secs as u64))
         .send()
         .await
         .map_err(|e| format!("kick token failed: {}", e))?
@@ -392,7 +392,7 @@ pub async fn login_kick(eng: &EngineHandle, fallback_handle: &str, cfg: &ChatCon
     if let Ok(resp) = client
         .get("https://api.kick.com/public/v1/users")
         .header("Authorization", format!("Bearer {}", access))
-        .timeout(Duration::from_secs(cfg.login_http_timeout_secs))
+        .timeout(Duration::from_secs(cfg.login_http_timeout_secs as u64))
         .send()
         .await
     {
@@ -468,7 +468,7 @@ pub async fn login_youtube(eng: &EngineHandle, cfg: &ChatConfig) -> Result<Login
             ("redirect_uri", redirect_uri(cfg.oauth_redirect_port).as_str()),
             ("grant_type", "authorization_code"),
         ])
-        .timeout(Duration::from_secs(cfg.login_http_timeout_secs))
+        .timeout(Duration::from_secs(cfg.login_http_timeout_secs as u64))
         .send()
         .await
         .map_err(|e| format!("google token failed: {}", e))?
@@ -486,7 +486,7 @@ pub async fn login_youtube(eng: &EngineHandle, cfg: &ChatConfig) -> Result<Login
         .get("https://www.googleapis.com/youtube/v3/channels")
         .query(&[("part", "id,snippet"), ("mine", "true")])
         .header("Authorization", format!("Bearer {}", access))
-        .timeout(Duration::from_secs(cfg.login_http_timeout_secs))
+        .timeout(Duration::from_secs(cfg.login_http_timeout_secs as u64))
         .send()
         .await
         .map_err(|e| format!("youtube channels failed: {}", e))?

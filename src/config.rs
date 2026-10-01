@@ -13,7 +13,7 @@ pub struct ChatConfig {
     pub disable_custom_colors: bool,
     // Message easing
     pub easing_enabled: bool,
-    pub easing_target_per_min: f64,
+    pub easing_target_per_min: f32,
     // Images (ascii rendering)
     pub images_mode: String, // "none" | "all"
     pub ascii_converter_path: String,
@@ -53,15 +53,15 @@ pub struct ChatConfig {
     /// Hard cap on how long a clip is allowed to play (seconds); longer clips
     /// are skipped.
     #[serde(default = "default_max_audio_seconds")]
-    pub max_audio_seconds: f64,
+    pub max_audio_seconds: f32,
     /// Playback volume (0.0–1.0).
     #[serde(default = "default_audio_volume")]
-    pub audio_volume: f64,
+    pub audio_volume: f32,
     // Message fade (roadmap: "disappear after x seconds")
     /// Seconds a message stays on screen before being faded out. `0` = never
     /// fade (default).
     #[serde(default)]
-    pub message_fade_secs: u64,
+    pub message_fade_secs: u32,
     /// `"remove"` = drop the message outright at the timeout; `"dim"` = dim it
     /// for the final ~2s (or ~20% of the lifetime) then drop it.
     #[serde(default = "default_message_fade_mode")]
@@ -82,7 +82,7 @@ pub struct ChatConfig {
     pub audio_fetch_retries: u32,
     /// Delay between audio fetch retries (ms).
     #[serde(default = "default_audio_fetch_retry_delay_ms")]
-    pub audio_fetch_retry_delay_ms: u64,
+    pub audio_fetch_retry_delay_ms: u32,
     /// Hard cap on a single downloaded image's bytes.
     #[serde(default = "default_image_max_bytes")]
     pub image_max_bytes: usize,
@@ -91,7 +91,7 @@ pub struct ChatConfig {
     pub image_max_concurrent: usize,
     /// Per-download HTTP timeout (seconds).
     #[serde(default = "default_image_timeout_secs")]
-    pub image_timeout_secs: u64,
+    pub image_timeout_secs: u32,
     /// Cache eviction bound: ~multiplier × visible chat height.
     #[serde(default = "default_image_cache_multiplier")]
     pub image_cache_multiplier: usize,
@@ -100,37 +100,37 @@ pub struct ChatConfig {
     pub image_cache_min: usize,
     /// Fraction of the terminal an embedded image may occupy.
     #[serde(default = "default_image_fit_fraction")]
-    pub image_fit_fraction: f64,
+    pub image_fit_fraction: f32,
     /// Fraction of a message's lifetime used for the dim fade-out window.
     #[serde(default = "default_fade_dim_fraction")]
-    pub fade_dim_fraction: f64,
+    pub fade_dim_fraction: f32,
     /// Cap on the dim fade-out window (seconds).
     #[serde(default = "default_fade_dim_max_secs")]
-    pub fade_dim_max_secs: u64,
+    pub fade_dim_max_secs: u32,
     /// Idle gap (seconds) after which a buffered easing queue flushes.
     #[serde(default = "default_easing_idle_flush_secs")]
-    pub easing_idle_flush_secs: u64,
+    pub easing_idle_flush_secs: u32,
     /// Mouse-wheel scroll step (messages).
     #[serde(default = "default_scroll_step")]
     pub scroll_step: usize,
     /// Deadline for a database query round-trip (seconds).
     #[serde(default = "default_db_query_timeout_secs")]
-    pub db_query_timeout_secs: u64,
+    pub db_query_timeout_secs: u32,
     /// Capacity of the engine result broadcast channel.
     #[serde(default = "default_query_broadcast_cap")]
     pub query_broadcast_cap: usize,
     /// Default timeout (seconds) when a typed timeout can't be parsed.
     #[serde(default = "default_default_timeout_secs")]
-    pub default_timeout_secs: i64,
+    pub default_timeout_secs: i32,
     /// Initial reconnect backoff (seconds).
     #[serde(default = "default_reconnect_base_secs")]
-    pub reconnect_base_secs: u64,
+    pub reconnect_base_secs: u32,
     /// Reconnect backoff cap (seconds).
     #[serde(default = "default_reconnect_max_secs")]
-    pub reconnect_max_secs: u64,
+    pub reconnect_max_secs: u32,
     /// HTTP timeout for login API calls (seconds).
     #[serde(default = "default_login_http_timeout_secs")]
-    pub login_http_timeout_secs: u64,
+    pub login_http_timeout_secs: u32,
     /// How many loopback redirect connections the OAuth listener accepts.
     #[serde(default = "default_oauth_listener_attempts")]
     pub oauth_listener_attempts: u32,
@@ -144,11 +144,11 @@ fn default_play_audio() -> bool {
     true
 }
 
-fn default_max_audio_seconds() -> f64 {
+fn default_max_audio_seconds() -> f32 {
     15.0
 }
 
-fn default_audio_volume() -> f64 {
+fn default_audio_volume() -> f32 {
     0.4
 }
 
@@ -164,7 +164,7 @@ fn default_audio_fetch_retries() -> u32 {
     3
 }
 
-fn default_audio_fetch_retry_delay_ms() -> u64 {
+fn default_audio_fetch_retry_delay_ms() -> u32 {
     800
 }
 
@@ -176,7 +176,7 @@ fn default_image_max_concurrent() -> usize {
     8
 }
 
-fn default_image_timeout_secs() -> u64 {
+fn default_image_timeout_secs() -> u32 {
     15
 }
 
@@ -188,19 +188,19 @@ fn default_image_cache_min() -> usize {
     8
 }
 
-fn default_image_fit_fraction() -> f64 {
+fn default_image_fit_fraction() -> f32 {
     0.8
 }
 
-fn default_fade_dim_fraction() -> f64 {
+fn default_fade_dim_fraction() -> f32 {
     0.2
 }
 
-fn default_fade_dim_max_secs() -> u64 {
+fn default_fade_dim_max_secs() -> u32 {
     2
 }
 
-fn default_easing_idle_flush_secs() -> u64 {
+fn default_easing_idle_flush_secs() -> u32 {
     2
 }
 
@@ -208,7 +208,7 @@ fn default_scroll_step() -> usize {
     3
 }
 
-fn default_db_query_timeout_secs() -> u64 {
+fn default_db_query_timeout_secs() -> u32 {
     10
 }
 
@@ -216,19 +216,19 @@ fn default_query_broadcast_cap() -> usize {
     256
 }
 
-fn default_default_timeout_secs() -> i64 {
+fn default_default_timeout_secs() -> i32 {
     300
 }
 
-fn default_reconnect_base_secs() -> u64 {
+fn default_reconnect_base_secs() -> u32 {
     1
 }
 
-fn default_reconnect_max_secs() -> u64 {
+fn default_reconnect_max_secs() -> u32 {
     30
 }
 
-fn default_login_http_timeout_secs() -> u64 {
+fn default_login_http_timeout_secs() -> u32 {
     20
 }
 

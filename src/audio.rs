@@ -20,13 +20,13 @@ pub struct AudioFetcher {
 impl AudioFetcher {
     /// Serializes fetch + enqueue so concurrent fetches can't cross-match.
     /// Records the message uuid7s whose audio has already been fetched/played.
-    pub fn with_retries(retries: u32, retry_delay_ms: u64) -> Self {
+    pub fn with_retries(retries: u32, retry_delay_ms: u32) -> Self {
         Self {
             inner: Arc::new(AudioFetcherInner {
                 gate: tokio::sync::Mutex::new(()),
                 fetched: std::sync::Mutex::new(HashSet::new()),
                 retries: retries.max(1),
-                retry_delay: Duration::from_millis(retry_delay_ms),
+                retry_delay: Duration::from_millis(retry_delay_ms as u64),
             }),
         }
     }
@@ -53,7 +53,7 @@ impl AudioFetcher {
     /// Play audio that rode WITH the message (no engine round-trip needed).
     /// Records the message uuid so a later engine re-delivery won't fetch +
     /// replay the same clip.
-    pub fn play_inline(&self, uuid7: &str, bytes: Vec<u8>, volume: f64, max_seconds: f64) {
+    pub fn play_inline(&self, uuid7: &str, bytes: Vec<u8>, volume: f32, max_seconds: f32) {
         if !uuid7.is_empty() {
             self.mark_fetched(uuid7);
         }
@@ -83,8 +83,8 @@ impl AudioFetcher {
         &self,
         engine: &EngineHandle,
         uuid7: &str,
-        volume: f64,
-        max_seconds: f64,
+        volume: f32,
+        max_seconds: f32,
     ) {
         if uuid7.is_empty() || self.already_fetched(uuid7) {
             return;
@@ -118,7 +118,7 @@ impl AudioFetcher {
 /// so playback never blocks the UI loop. Enforces the volume and the max
 /// clip-length cap: clips longer than `max_seconds` are skipped entirely, and
 /// even unknown-length clips are stopped once the cap elapses.
-pub fn play_audio(bytes: Vec<u8>, volume: f64, max_seconds: f64) {
+pub fn play_audio(bytes: Vec<u8>, volume: f32, max_seconds: f32) {
     if bytes.is_empty() {
         return;
     }
@@ -129,17 +129,17 @@ pub fn play_audio(bytes: Vec<u8>, volume: f64, max_seconds: f64) {
 
         // Known-length clips over the cap are skipped.
         if let Some(d) = decoder.total_duration() {
-            if d.as_secs_f64() > max_seconds {
+            if d.as_secs_f64() > max_seconds as f64 {
                 return;
             }
         }
 
-        sink.set_volume(volume.clamp(0.0, 1.0) as f32);
+        sink.set_volume(volume.clamp(0.0, 1.0));
         sink.append(decoder);
 
         // Hard cap: stop after max_seconds even when the length was unknown.
         let deadline = std::time::Instant::now()
-            + Duration::from_secs_f64(max_seconds.max(0.1));
+            + Duration::from_secs_f64(max_seconds.max(0.1) as f64);
         loop {
             if sink.empty() {
                 break;

@@ -31,7 +31,7 @@
   "credentials": [
     {
       "key": "terminal_emulators",
-      "label": "Terminal emulators (toggle true/false; first enabled wins \u2014 discovered automatically)",
+      "label": "Terminal emulators (toggle true/false; first enabled wins — discovered automatically)",
       "list": true,
       "optional": true,
       "sensitive": false

@@ -33,12 +33,12 @@ pub enum FadeAction {
 /// Length of the fade-out window used in `Dim` mode: the final `dim_fraction`
 /// of the lifetime, capped at `dim_max_secs` so short lifetimes still get a
 /// quick dim.
-pub fn fade_window(fade_secs: u64, dim_fraction: f64, dim_max_secs: u64) -> Duration {
+pub fn fade_window(fade_secs: u32, dim_fraction: f32, dim_max_secs: u32) -> Duration {
     if fade_secs == 0 {
         return Duration::ZERO;
     }
-    let fraction = Duration::from_secs_f64(fade_secs as f64 * dim_fraction);
-    fraction.min(Duration::from_secs(dim_max_secs))
+    let fraction = Duration::from_secs_f64((fade_secs as f32 * dim_fraction) as f64);
+    fraction.min(Duration::from_secs(dim_max_secs as u64))
 }
 
 /// Decide what to do with a message of the given `age`.
@@ -48,15 +48,15 @@ pub fn fade_window(fade_secs: u64, dim_fraction: f64, dim_max_secs: u64) -> Dura
 /// last `fade_window(fade_secs)` before being removed at `fade_secs`.
 pub fn fade_action(
     age: Duration,
-    fade_secs: u64,
+    fade_secs: u32,
     mode: FadeMode,
-    dim_fraction: f64,
-    dim_max_secs: u64,
+    dim_fraction: f32,
+    dim_max_secs: u32,
 ) -> FadeAction {
     if fade_secs == 0 {
         return FadeAction::Keep;
     }
-    let total = Duration::from_secs(fade_secs);
+    let total = Duration::from_secs(fade_secs as u64);
     match mode {
         FadeMode::Remove => {
             if age >= total {

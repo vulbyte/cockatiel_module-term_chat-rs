@@ -10,7 +10,7 @@ use crate::types::ChatMessageItem;
 /// otherwise grow without bound until a long idle gap flushed it.
 pub struct EasingQueue {
     pub enabled: bool,
-    pub target_per_min: f64,
+    pub target_per_min: f32,
     max_buffered: usize,
     idle_flush: Duration,
     last_emit: Option<Instant>,
@@ -18,7 +18,7 @@ pub struct EasingQueue {
 }
 
 impl EasingQueue {
-    pub fn new(enabled: bool, target_per_min: f64, max_buffered: usize, idle_flush_secs: u64) -> Self {
+    pub fn new(enabled: bool, target_per_min: f32, max_buffered: usize, idle_flush_secs: u32) -> Self {
         Self {
             enabled,
             target_per_min: if target_per_min > 0.0 {
@@ -27,7 +27,7 @@ impl EasingQueue {
                 120.0
             },
             max_buffered: max_buffered.max(1),
-            idle_flush: Duration::from_secs(idle_flush_secs),
+            idle_flush: Duration::from_secs(idle_flush_secs as u64),
             last_emit: None,
             buffer: VecDeque::new(),
         }
@@ -56,7 +56,7 @@ impl EasingQueue {
             return Vec::new();
         }
 
-        let interval = Duration::from_secs_f64(60.0 / self.target_per_min);
+        let interval = Duration::from_secs_f64((60.0 / self.target_per_min) as f64);
         let since = self
             .last_emit
             .map(|t| now.saturating_duration_since(t))
