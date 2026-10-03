@@ -161,11 +161,11 @@ fn default_oauth_redirect_port() -> u16 {
 }
 
 fn default_audio_fetch_retries() -> u32 {
-    3
+    10
 }
 
 fn default_audio_fetch_retry_delay_ms() -> u32 {
-    800
+    1000
 }
 
 fn default_image_max_bytes() -> usize {
