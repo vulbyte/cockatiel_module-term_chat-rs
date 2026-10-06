@@ -44,5 +44,10 @@
   "price": 0,
   "root_file": "./src/main.rs",
   "terminal": true,
-  "version": "0.2.0"
+  "version": "0.2.0",
+  "release": {
+    "repo": "vulbyte/cockatiel_module-term_chat-rs",
+    "base_url": "https://github.com/vulbyte/cockatiel_module-term_chat-rs/releases/download",
+    "tag": "v0.2.0"
+  }
 }
