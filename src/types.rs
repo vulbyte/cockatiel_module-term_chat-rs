@@ -10,6 +10,9 @@ pub struct ChatMessageItem {
     /// for logic — `image_min_rank` compares against this; `rank` (the name)
     /// is for display only.
     pub rank_value: f32,
+    /// The user's score (points), from the engine's `score` css property.
+    /// Displayed beside the name when `show_score` is on.
+    pub score: i32,
     pub role_badges: String,
     /// True when the user has been reprimanded (reprimands counter > 0);
     /// drives the compact `R` indicator.

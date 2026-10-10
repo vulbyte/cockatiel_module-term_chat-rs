@@ -63,6 +63,16 @@ fn bracket_content(
     if config.show_username && !msg.username.is_empty() {
         user_bit = msg.username.clone();
     }
+    // Score (points) beside the name, so viewers can see how many they have.
+    // `42p` reads as "42 points" and cannot be mistaken for the `(rank)` text.
+    if config.show_score && !user_bit.is_empty() {
+        let score_txt = format!(" {}p", msg.score);
+        if config.show_score_color {
+            user_bit.push_str(&format!("\x1b[36m{}\x1b[0m", score_txt));
+        } else {
+            user_bit.push_str(&score_txt);
+        }
+    }
     if config.show_rank && !msg.rank.is_empty() && msg.rank != "regular"
         && !user_bit.is_empty() {
             let rank_txt = format!(" ({})", msg.rank);
@@ -451,6 +461,7 @@ mod bracket_tests {
             name_color: String::new(),
             rank: rank.into(),
             rank_value: 0.0,
+            score: 0,
             role_badges: badges.into(),
             reprimanded,
             platform: "tw".into(),
@@ -514,5 +525,34 @@ mod bracket_tests {
         assert!(b.contains("opal"));
         assert!(b.contains("MOD"));
         assert!(b.contains('R'));
+    }
+
+    #[test]
+    fn score_shown_beside_the_name_and_gated_by_toggle() {
+        let mut msg = item("bob", "opal", "", false);
+        msg.score = 42;
+
+        let mut cfg = ChatConfig::default();
+        cfg.show_score = true;
+        cfg.show_score_color = true;
+        let b = bracket_content(&msg, &cfg);
+        assert!(b.contains("42p"), "score must render beside the name: {b}");
+        assert!(b.contains("\x1b[36m"), "score colored when the color toggle is on");
+        // The score sits after the name (beside it), before the `(rank)` text.
+        assert!(
+            b.find("42p").unwrap() < b.find("(opal)").unwrap(),
+            "score must come right after the name: {b}"
+        );
+
+        // Uncolored variant still shows the number.
+        cfg.show_score_color = false;
+        let b = bracket_content(&msg, &cfg);
+        assert!(b.contains("42p"));
+        assert!(!b.contains("\x1b[36m"));
+
+        // Toggle off -> no score at all.
+        cfg.show_score = false;
+        let b = bracket_content(&msg, &cfg);
+        assert!(!b.contains("42p"), "score hidden when toggled off: {b}");
     }
 }

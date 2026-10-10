@@ -90,6 +90,7 @@ mod tests {
             name_color: String::new(),
             rank: String::new(),
             rank_value: 0.0,
+            score: 0,
             role_badges: String::new(),
             reprimanded: false,
             platform: String::new(),

@@ -76,6 +76,12 @@ pub struct ChatConfig {
     /// Color the rank text (e.g. `(opal)`).
     #[serde(default = "default_true")]
     pub show_rank_color: bool,
+    /// Show the user's score (points) beside their name.
+    #[serde(default = "default_true")]
+    pub show_score: bool,
+    /// Color the score text.
+    #[serde(default = "default_true")]
+    pub show_score_color: bool,
     // Tuning values (all defaulted; created in config.json when missing).
     /// Audio fetch retries before giving up on a TTS clip.
     #[serde(default = "default_audio_fetch_retries")]
@@ -267,6 +273,8 @@ impl Default for ChatConfig {
             show_reprimand: true,
             show_status_color: true,
             show_rank_color: true,
+            show_score: true,
+            show_score_color: true,
             audio_fetch_retries: 3,
             audio_fetch_retry_delay_ms: 800,
             image_max_bytes: 10 * 1024 * 1024,
@@ -316,6 +324,8 @@ impl ChatConfig {
                             "show_reprimand": true,
                             "show_status_color": true,
                             "show_rank_color": true,
+                            "show_score": true,
+                            "show_score_color": true,
                             "audio_fetch_retries": 3,
                             "audio_fetch_retry_delay_ms": 800,
                             "image_max_bytes": 10 * 1024 * 1024,

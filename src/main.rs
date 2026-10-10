@@ -40,40 +40,13 @@ use login::LoginState;
 use render::Ui;
 use types::{AppStatus, ChatMessageItem, UiMode};
 
-/// Whether a post-process message is a `!tts` prompt the command-scoped TTS
-/// module will render (mirrors tts-rs's `extract_tts_prompt`). The engine does
-/// NOT attach a parsed command to adapter-ingested messages — the youtube
-/// adapter sends `command: None` and routing falls back to "send to every
-/// post-process module", so tts-rs filters internally by the `!tts` prefix.
-/// term-chat must apply the same text filter, or a plain chat message would sit
-/// at the head of the serialized player burning its fetch-retry window on audio
-/// that will never exist.
-fn is_tts_post_process(pp: &cockatiel_client::proto::MessagePostProcess) -> bool {
-    let raw = pp
-        .raw_message
-        .as_ref()
-        .map(|cm| cm.raw_message.as_str())
-        .unwrap_or("");
-    let trimmed = raw.trim();
-    let lower = trimmed.to_ascii_lowercase();
-    if !lower.starts_with("!tts") {
-        return false;
-    }
-    let rest = &trimmed[4..];
-    // Require a separator after the token so `!ttssomething` isn't a command.
-    if rest.is_empty() {
-        return false;
-    }
-    rest.starts_with(char::is_whitespace)
-}
-
 fn build_message_item(
     payload: &ModulePayload,
     emoji_map: &HashMap<String, String>,
     emoji_regexes: &HashMap<String, Regex>,
     emoji_enabled: bool,
 ) -> Option<ChatMessageItem> {
-    let (platform, content, username, name_color, rank, rank_value, reprimanded, role_badges, user_handle, user_uuid7, message_uuid7, stage) =
+    let (platform, content, username, name_color, rank, rank_value, score, reprimanded, role_badges, user_handle, user_uuid7, message_uuid7, stage) =
         match payload {
             ModulePayload::MessagePostProcess(pp) => {
                 let raw = pp.raw_message.as_ref();
@@ -96,6 +69,10 @@ fn build_message_item(
                     .and_then(|st| st.css_properties.get("rank_value"))
                     .and_then(|s| s.parse::<f32>().ok())
                     .unwrap_or(0.0);
+                let score = styling
+                    .and_then(|st| st.css_properties.get("score"))
+                    .and_then(|s| s.parse::<i32>().ok())
+                    .unwrap_or(0);
                 let reprimanded = styling
                     .and_then(|st| st.css_properties.get("reprimands"))
                     .and_then(|s| s.parse::<i32>().ok())
@@ -114,6 +91,7 @@ fn build_message_item(
                     name_color,
                     rank,
                     rank_value,
+                    score,
                     reprimanded,
                     role_badges,
                     raw.map(|cm| cm.user_uuid7.clone()).unwrap_or_default(),
@@ -143,6 +121,10 @@ fn build_message_item(
                     .and_then(|st| st.css_properties.get("rank_value"))
                     .and_then(|s| s.parse::<f32>().ok())
                     .unwrap_or(0.0);
+                let score = styling
+                    .and_then(|st| st.css_properties.get("score"))
+                    .and_then(|s| s.parse::<i32>().ok())
+                    .unwrap_or(0);
                 let reprimanded = styling
                     .and_then(|st| st.css_properties.get("reprimands"))
                     .and_then(|s| s.parse::<i32>().ok())
@@ -157,6 +139,7 @@ fn build_message_item(
                     name_color,
                     rank,
                     rank_value,
+                    score,
                     reprimanded,
                     role_badges,
                     raw.map(|cm| cm.user_uuid7.clone()).unwrap_or_default(),
@@ -173,6 +156,11 @@ fn build_message_item(
     } else {
         content
     };
+
+    eprintln!(
+        "[dbg-tc] stage={} user={:?} rank={:?} rank_value={} score={}",
+        stage, username, rank, rank_value, score
+    );
 
     // Key the item by the engine's message uuid7 so an engine re-delivery
     // (recovery re-queue of the SAME pipeline stage) coalesces into the same
@@ -191,6 +179,7 @@ fn build_message_item(
         name_color,
         rank,
         rank_value,
+        score,
         role_badges,
         reprimanded,
         platform,
@@ -342,13 +331,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(images::load_map(&config.image_map_path));
     let image_regexes: Arc<HashMap<String, Regex>> =
         Arc::new(images::compile_map_regexes(image_map.as_ref()));
-    let audio_player = audio::AudioPlayer::start(
-        Arc::clone(&engine_state),
-        config.audio_volume,
-        config.max_audio_seconds,
-        config.audio_fetch_retries,
-        config.audio_fetch_retry_delay_ms,
-    );
+    let audio_player =
+        audio::AudioPlayer::start(config.audio_volume, config.max_audio_seconds);
 
     // Read task: engine -> UI, with automatic reconnect (exponential backoff).
     {
@@ -493,27 +477,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     }
                                 }
-                                // Audio playback (TTS clips): audio created by a
-                                // pre/in-process module rides WITH the message;
-                                // audio created at the post-process stage is
-                                // saved to the timeline and fetched here. Both
-                                // go through the single serialized player, which
-                                // plays one clip to completion before the next.
-                                //
-                                // The post-process fetch is enqueued ONLY for a
-                                // `!tts` message (the command-scoped TTS module
-                                // is the only post-process source of rendered
-                                // audio). Enqueueing every message would let a
-                                // plain chat message sit at the head of the
-                                // queue burning its whole fetch-retry window on
-                                // audio that will never exist — stalling the
-                                // stream of clips behind it.
+                                // Audio playback (TTS clips): content-generating
+                                // modules (tts-rs) run in-process and attach
+                                // their audio to the message, which rides WITH
+                                // it. It goes through the single serialized
+                                // player, which plays one clip to completion
+                                // before the next.
                                 if play_audio {
                                     if let ModulePayload::MessagePostProcess(pp) = &other {
                                         if !pp.audio.is_empty() {
                                             audio_player.play_inline(&pp.message_uuid7, pp.audio.clone());
-                                        } else if !pp.message_uuid7.is_empty() && is_tts_post_process(pp) {
-                                            audio_player.play_tts(&pp.message_uuid7);
                                         }
                                     }
                                 }
@@ -962,50 +935,4 @@ async fn send_mod_action(
         }
     }
 }
-#[cfg(test)]
-mod tests {
-    use super::*;
 
-    fn post_with_raw(raw: &str) -> cockatiel_client::proto::MessagePostProcess {
-        let cm = Some(cockatiel_client::proto::ChatMessage {
-            platform: "test".to_string(),
-            raw_data: vec![],
-            raw_message: raw.to_string(),
-            user_uuid7: "u1".to_string(),
-            command: None,
-            channel_id: "c1".to_string(),
-            user_data: None,
-        });
-        cockatiel_client::proto::MessagePostProcess {
-            message_uuid7: "uuid7".to_string(),
-            raw_message: cm,
-            processed_message: String::new(),
-            audio: vec![],
-            audio_type: String::new(),
-        }
-    }
-
-    #[test]
-    fn tts_post_process_matches_tts_prompt_text() {
-        assert!(
-            is_tts_post_process(&post_with_raw("!tts hello chat")),
-            "a !tts message must enqueue audio"
-        );
-        assert!(
-            is_tts_post_process(&post_with_raw("  !tts  hello  ")),
-            "leading whitespace is trimmed"
-        );
-        assert!(
-            !is_tts_post_process(&post_with_raw("hello chat")),
-            "a plain chat message must not enqueue audio"
-        );
-        assert!(
-            !is_tts_post_process(&post_with_raw("!ttssomething")),
-            "no separator after the token is not a command"
-        );
-        assert!(
-            !is_tts_post_process(&post_with_raw("!tts")),
-            "a bare token with nothing to say is not spoken"
-        );
-    }
-}
