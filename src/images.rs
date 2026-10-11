@@ -11,7 +11,7 @@ use tokio::sync::{Mutex, Semaphore};
 fn image_url_regex() -> &'static Regex {
     static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"https?://[^\s<>]+?\.(?:png|jpe?g|gif|webp)(?:\?[^\s<>]*)?")
+        Regex::new(r"(?i)https?://[^\s<>]+?\.(?:png|apng|jpe?g|gif|webp)(?:\?[^\s<>]*)?")
             .expect("image URL regex must compile")
     })
 }
@@ -61,7 +61,10 @@ fn mapped_urls(
         }
         let colon = format!(":{}:", key);
         let colon_hit = text.contains(&colon);
-        let word_hit = regexes.get(key).map(|re| re.is_match(text)).unwrap_or(false);
+        let word_hit = regexes
+            .get(key)
+            .map(|re| re.is_match(text))
+            .unwrap_or(false);
         if colon_hit || word_hit {
             out.push(val.clone());
         }
@@ -94,10 +97,52 @@ pub fn collect_image_urls(
 /// Outcome of trying to embed a URL as ascii art.
 #[derive(Debug, Clone)]
 pub enum RenderResult {
-    /// Successfully converted.
+    /// Successfully converted a static image.
     Ok(String),
+    /// Converted an animation: ascii frames + per-frame duration (ms).
+    Frames(Vec<String>, Vec<u32>),
     /// Could not be shown; the string is a human-readable reason.
     Reason(String),
+}
+
+/// True when a response `Content-Type` may carry an image. Some CDNs serve
+/// images as a generic `application/octet-stream` / `binary/*`, and a few omit
+/// the header entirely; accept those and sniff the bytes during decode.
+fn content_type_is_image(ctype: &str) -> bool {
+    let ctype = ctype.trim();
+    if ctype.is_empty() {
+        return true;
+    }
+    let ct = ctype.split(';').next().unwrap_or(ctype).trim();
+    ct.starts_with("image/") || ct == "application/octet-stream" || ct.starts_with("binary/")
+}
+
+/// True when an external converter is runnable. An explicit path (contains a
+/// separator) is checked directly; a bare program name is looked up on `PATH`
+/// (a `.exe` suffix is also tried on Windows).
+fn converter_available(path: &str) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    let is_explicit =
+        path.contains('/') || path.contains('\\') || path.contains(std::path::MAIN_SEPARATOR);
+    if is_explicit {
+        return std::path::Path::new(path).is_file();
+    }
+    let Some(path_var) = std::env::var_os("PATH") else {
+        return false;
+    };
+    let names: Vec<std::ffi::OsString> = if cfg!(windows) {
+        vec![path.into(), format!("{}.exe", path).into()]
+    } else {
+        vec![path.into()]
+    };
+    for dir in std::env::split_paths(&path_var) {
+        if names.iter().any(|name| dir.join(name).is_file()) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Bounded LRU-ish cache of rendered art, keyed by `url|colsxrows`.
@@ -214,7 +259,10 @@ impl ImageRenderer {
             return RenderResult::Reason("embedding not allowed".to_string());
         }
         if !resp.status().is_success() {
-            return RenderResult::Reason(format!("download failed (HTTP {})", resp.status().as_u16()));
+            return RenderResult::Reason(format!(
+                "download failed (HTTP {})",
+                resp.status().as_u16()
+            ));
         }
 
         // Not an image → nothing to embed.
@@ -224,7 +272,7 @@ impl ImageRenderer {
             .and_then(|v| v.to_str().ok())
             .unwrap_or_default()
             .to_ascii_lowercase();
-        if !ctype.is_empty() && !ctype.starts_with("image/") {
+        if !content_type_is_image(&ctype) {
             return RenderResult::Reason("not an image".to_string());
         }
 
@@ -271,10 +319,17 @@ impl ImageRenderer {
 
         let (out_w, out_h) = fit_dimensions(cols, rows, iw, ih, self.fit_fraction);
 
+        // Animated GIF/APNG: extract every frame and animate inside this
+        // module (never shell out for animation). A single-frame file falls
+        // through to the static path below.
+        if let Some(anim) = extract_frames(&bytes, out_w, out_h) {
+            return anim;
+        }
+
         // Prefer the external converter when it's actually installed (nicer
-        // output + animated gifs); otherwise use the built-in renderer so the
-        // feature works with no external dependency.
-        if !self.converter_path.is_empty() && std::path::Path::new(&self.converter_path).exists() {
+        // output); otherwise use the built-in renderer so the feature works
+        // with no external dependency.
+        if converter_available(&self.converter_path) {
             self.convert_external(&bytes, out_w).await
         } else {
             self.convert_builtin(&img, out_w, out_h)
@@ -329,6 +384,64 @@ impl ImageRenderer {
     }
 }
 
+/// Hard cap on frames decoded from one animation (bounds ascii memory).
+const MAX_ANIM_FRAMES: usize = 150;
+/// Floor/ceiling for a single frame's on-screen duration.
+const MIN_FRAME_MS: u32 = 20;
+const MAX_FRAME_MS: u32 = 2000;
+
+/// Decode + ascii-render every frame of a GIF or APNG. Returns `None` when the
+/// bytes are another format, contain a single frame (static), or fail to
+/// decode (caller then falls back to the static first-frame path).
+fn extract_frames(bytes: &[u8], out_w: u32, out_h: u32) -> Option<RenderResult> {
+    use image::AnimationDecoder;
+    let format = image::guess_format(bytes).ok()?;
+    // Iterate rather than `collect_frames()` so an over-long animation stops
+    // decoding at the cap instead of buffering every frame (memory bound).
+    let frame_iter = match format {
+        image::ImageFormat::Gif => image::codecs::gif::GifDecoder::new(Cursor::new(bytes))
+            .ok()?
+            .into_frames(),
+        image::ImageFormat::Png => image::codecs::png::PngDecoder::new(Cursor::new(bytes))
+            .ok()?
+            .apng()
+            .ok()?
+            .into_frames(),
+        _ => return None,
+    };
+
+    let mut decoded = Vec::new();
+    let mut capped = false;
+    for frame in frame_iter {
+        decoded.push(frame.ok()?); // a bad frame falls back to the static path
+        if decoded.len() > MAX_ANIM_FRAMES {
+            decoded.truncate(MAX_ANIM_FRAMES);
+            capped = true;
+            break;
+        }
+    }
+    if decoded.len() <= 1 {
+        return None;
+    }
+    if capped {
+        tracing::warn!(
+            "[image] animation capped at {} frames for ascii playback",
+            MAX_ANIM_FRAMES
+        );
+    }
+
+    let mut arts = Vec::with_capacity(decoded.len());
+    let mut delays = Vec::with_capacity(decoded.len());
+    for frame in decoded {
+        let (num, den) = frame.delay().numer_denom_ms();
+        let ms = num.checked_div(den).unwrap_or(MIN_FRAME_MS);
+        delays.push(ms.clamp(MIN_FRAME_MS, MAX_FRAME_MS));
+        let img = image::DynamicImage::ImageRgba8(frame.into_buffer());
+        arts.push(image_to_ascii(&img, out_w, out_h));
+    }
+    Some(RenderResult::Frames(arts, delays))
+}
+
 /// Compute the ascii cell dimensions so the image's longest dimension fits
 /// within `fraction` of the terminal (width and height), preserving aspect
 /// ratio (terminal cells are ~2:1 so rows = H/2 in cell units). Never upscales.
@@ -337,9 +450,7 @@ fn fit_dimensions(cols: u16, rows: u16, iw: u32, ih: u32, fraction: f32) -> (u32
     let max_h = ((rows as f32 * fraction) as usize).max(3);
     let cell_w = iw as f32;
     let cell_h = ih as f32 / 2.0;
-    let scale = (max_w as f32 / cell_w)
-        .min(max_h as f32 / cell_h)
-        .min(1.0);
+    let scale = (max_w as f32 / cell_w).min(max_h as f32 / cell_h).min(1.0);
     let out_w = ((cell_w * scale).round() as u32).max(1);
     let out_h = ((cell_h * scale).round() as u32).max(1);
     (out_w, out_h)
@@ -402,8 +513,17 @@ mod tests {
     #[test]
     fn render_cache_is_keyed_by_terminal_size() {
         // The cache key must include cols x rows so a resize re-renders.
-        let renderer =
-            ImageRenderer::new(String::new(), 60, String::new(), 10 * 1024 * 1024, 8, 15, 4, 8, 0.8);
+        let renderer = ImageRenderer::new(
+            String::new(),
+            60,
+            String::new(),
+            10 * 1024 * 1024,
+            8,
+            15,
+            4,
+            8,
+            0.8,
+        );
         // Construct keys the same way `render` does.
         let k1 = format!("{}|{}x{}", "http://x/i.png", 120u16, 30u16);
         let k2 = format!("{}|{}x{}", "http://x/i.png", 60u16, 20u16);
@@ -427,5 +547,73 @@ mod tests {
         // "cat" inside "scatter" must NOT match — only the standalone token.
         let urls = collect_image_urls("scatter is not a cat", &map, &regexes);
         assert_eq!(urls, vec!["http://x/cat.gif".to_string()]);
+    }
+
+    #[test]
+    fn image_url_regex_is_case_insensitive_and_matches_apng() {
+        let re = image_url_regex();
+        for u in [
+            "http://x/a.PNG",
+            "http://x/a.apng",
+            "http://x/a.GIF",
+            "http://x/a.jpeg?q=1",
+        ] {
+            assert!(re.is_match(u), "should match {u}");
+        }
+        assert!(!re.is_match("http://x/a.txt"));
+        assert!(!re.is_match("a.png"));
+    }
+
+    #[test]
+    fn content_type_is_image_classifies() {
+        for ok in [
+            "",
+            "image/png",
+            "application/octet-stream",
+            "binary/octet-stream",
+        ] {
+            assert!(content_type_is_image(ok), "should accept {ok:?}");
+        }
+        for bad in ["text/html", "application/json"] {
+            assert!(!content_type_is_image(bad), "should reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn converter_available_handles_paths_and_path_lookup() {
+        assert!(!converter_available(""));
+        assert!(!converter_available(
+            "/nonexistent/definitely/missing-binary"
+        ));
+        #[cfg(unix)]
+        assert!(converter_available("sh"), "sh should be found on PATH");
+    }
+
+    #[test]
+    fn extract_frames_reads_two_frame_gif() {
+        use image::codecs::gif::GifEncoder;
+        use image::{Delay, Frame, RgbaImage};
+        let mut bytes = Vec::new();
+        {
+            let mut enc = GifEncoder::new(&mut bytes);
+            let frame = |v: u8| {
+                Frame::from_parts(
+                    RgbaImage::from_pixel(4, 4, image::Rgba([v, v, v, 255])),
+                    0,
+                    0,
+                    Delay::from_numer_denom_ms(100, 1),
+                )
+            };
+            enc.encode_frame(frame(0)).unwrap();
+            enc.encode_frame(frame(255)).unwrap();
+        }
+        match extract_frames(&bytes, 4, 4) {
+            Some(RenderResult::Frames(arts, delays)) => {
+                assert_eq!(arts.len(), 2);
+                assert_eq!(delays.len(), 2);
+                assert!(delays.iter().all(|d| (20..=2000).contains(d)));
+            }
+            other => panic!("expected two animated frames, got {other:?}"),
+        }
     }
 }

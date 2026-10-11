@@ -53,10 +53,7 @@ pub struct RenderedLine {
 }
 
 /// Build the bracket content (everything inside `[...]`) honoring display toggles.
-fn bracket_content(
-    msg: &ChatMessageItem,
-    config: &ChatConfig,
-) -> String {
+fn bracket_content(msg: &ChatMessageItem, config: &ChatConfig) -> String {
     let mut parts: Vec<String> = Vec::new();
 
     let mut user_bit = String::new();
@@ -73,15 +70,14 @@ fn bracket_content(
             user_bit.push_str(&score_txt);
         }
     }
-    if config.show_rank && !msg.rank.is_empty() && msg.rank != "regular"
-        && !user_bit.is_empty() {
-            let rank_txt = format!(" ({})", msg.rank);
-            if config.show_rank_color {
-                user_bit.push_str(&format!("\x1b[35m{}\x1b[0m", rank_txt));
-            } else {
-                user_bit.push_str(&rank_txt);
-            }
+    if config.show_rank && !msg.rank.is_empty() && msg.rank != "regular" && !user_bit.is_empty() {
+        let rank_txt = format!(" ({})", msg.rank);
+        if config.show_rank_color {
+            user_bit.push_str(&format!("\x1b[35m{}\x1b[0m", rank_txt));
+        } else {
+            user_bit.push_str(&rank_txt);
         }
+    }
     if config.show_role_badges && !msg.role_badges.is_empty() {
         if !user_bit.is_empty() {
             user_bit.push(' ');
@@ -124,7 +120,11 @@ fn rows_needed(line: &RenderedLine, cols: usize) -> usize {
     let image_rows = line
         .image_art
         .as_ref()
-        .map(|art| art.lines().map(|l| ceil_div(l.chars().count(), cols).max(1)).sum())
+        .map(|art| {
+            art.lines()
+                .map(|l| ceil_div(l.chars().count(), cols).max(1))
+                .sum()
+        })
         .unwrap_or_else(|| {
             // A failed/blocked image still takes a single `<image>` row.
             if line.image_status.is_some() {
@@ -145,6 +145,32 @@ fn visible_range(len: usize, scroll: usize) -> (usize, usize) {
     let skip_bottom = scroll.min(len);
     let count = len.saturating_sub(skip_bottom);
     (0, count)
+}
+
+/// Pick the frame visible at `elapsed` since the message entered the buffer.
+/// The cycle length is `sum(delays_ms)`; frame 0 is used when the inputs are
+/// structurally inconsistent or the total is zero.
+fn current_frame<'a>(
+    frames: &'a [String],
+    delays_ms: &[u32],
+    elapsed: std::time::Duration,
+) -> &'a str {
+    if frames.len() <= 1 || delays_ms.len() != frames.len() {
+        return &frames[0];
+    }
+    let total: u64 = delays_ms.iter().map(|d| u64::from(*d)).sum();
+    if total == 0 {
+        return &frames[0];
+    }
+    let pos = (elapsed.as_millis() as u64) % total;
+    let mut acc: u64 = 0;
+    for (i, d) in delays_ms.iter().enumerate() {
+        acc += u64::from(*d);
+        if pos < acc {
+            return &frames[i];
+        }
+    }
+    &frames[0]
 }
 
 /// Draw the full frame. Returns io::Result; caller holds the message/status locks.
@@ -187,6 +213,13 @@ pub fn draw(
             config.fade_dim_max_secs,
         );
         let dimmed = fade_action == FadeAction::Dim;
+        let image_art = match msg.image_frames.as_deref() {
+            Some(frames) if !frames.is_empty() => {
+                let delays = msg.image_frame_delays_ms.as_deref().unwrap_or(&[]);
+                Some(current_frame(frames, delays, age).to_string())
+            }
+            _ => msg.image_art.clone(),
+        };
         let line = RenderedLine {
             username: msg.username.clone(),
             name_color: if config.disable_custom_colors {
@@ -196,7 +229,7 @@ pub fn draw(
             },
             bracket_content: bracket_content(msg, config),
             content: msg.content.clone(),
-            image_art: msg.image_art.clone(),
+            image_art,
             image_status: msg.image_status.clone(),
             dimmed,
         };
@@ -239,16 +272,27 @@ pub fn draw(
         };
 
         let bracket = if !line.username.is_empty() {
-            line.bracket_content
-                .replacen(&line.username, &format!("{}{}\x1b[0m", name_prefix, line.username), 1)
+            line.bracket_content.replacen(
+                &line.username,
+                &format!("{}{}\x1b[0m", name_prefix, line.username),
+                1,
+            )
         } else {
             line.bracket_content.clone()
         };
 
-        let bracket_color = if line.dimmed { dim_color } else { default_color };
+        let bracket_color = if line.dimmed {
+            dim_color
+        } else {
+            default_color
+        };
         print!(
             "{}[{}]:\x1b[0m\r\n",
-            if bracket.is_empty() { "" } else { bracket_color },
+            if bracket.is_empty() {
+                ""
+            } else {
+                bracket_color
+            },
             bracket
         );
 
@@ -260,12 +304,18 @@ pub fn draw(
                     print!("{}\r\n", art_line);
                 }
             }
-        } else if line.image_status.is_some() {
-            // Image was registered but couldn't be embedded — plain placeholder.
-            if line.dimmed {
-                print!("{}\x1b[2m<image>\x1b[0m\r\n", dim_color);
+        } else if let Some(reason) = &line.image_status {
+            // Image was registered but couldn't be embedded. The reason is
+            // appended only when `image_show_errors` is on (diagnosability).
+            let placeholder = if config.image_show_errors {
+                format!("<image: {}>", reason)
             } else {
-                print!("\x1b[2m<image>\x1b[0m\r\n");
+                "<image>".to_string()
+            };
+            if line.dimmed {
+                print!("{}\x1b[2m{}\x1b[0m\r\n", dim_color, placeholder);
+            } else {
+                print!("\x1b[2m{}\x1b[0m\r\n", placeholder);
             }
         }
 
@@ -277,7 +327,11 @@ pub fn draw(
     }
 
     // 3. Status bar
-    let dot_color = if status.connected { "\x1b[32m" } else { "\x1b[31m" };
+    let dot_color = if status.connected {
+        "\x1b[32m"
+    } else {
+        "\x1b[31m"
+    };
     let login_bit = match login {
         Some(l) if !l.handle.is_empty() => {
             format!(" | {} {} ({})", l.platform, l.handle, l.effective.label())
@@ -309,7 +363,10 @@ pub fn draw(
     }
     let rest_str: String = rest_chars.into_iter().collect();
     stdout.execute(cursor::MoveTo(0, rows.saturating_sub(2) as u16))?;
-    print!("\x1b[100m\x1b[37m {}●\x1b[37m{}\x1b[0m", dot_color, rest_str);
+    print!(
+        "\x1b[100m\x1b[37m {}●\x1b[37m{}\x1b[0m",
+        dot_color, rest_str
+    );
 
     // 4. Footer
     stdout.execute(cursor::MoveTo(0, rows.saturating_sub(1) as u16))?;
@@ -330,12 +387,7 @@ pub fn draw(
     Ok(())
 }
 
-fn draw_box(
-    stdout: &mut io::Stdout,
-    cols: usize,
-    rows: usize,
-    lines: &[String],
-) -> io::Result<()> {
+fn draw_box(stdout: &mut io::Stdout, cols: usize, rows: usize, lines: &[String]) -> io::Result<()> {
     let width = lines.iter().map(|l| l.chars().count()).max().unwrap_or(10) + 4;
     let width = width.min(cols.saturating_sub(2).max(10));
     let height = lines.len() + 2;
@@ -351,11 +403,7 @@ fn draw_box(
             chars.push('…');
         }
         let content: String = chars.into_iter().collect();
-        print!(
-            "\x1b[100m\x1b[37m│ {:<pad$} │\x1b[0m",
-            content,
-            pad = pad
-        );
+        print!("\x1b[100m\x1b[37m│ {:<pad$} │\x1b[0m", content, pad = pad);
     }
     Ok(())
 }
@@ -410,7 +458,13 @@ fn draw_overlays(
             let target = ui
                 .action_target
                 .as_ref()
-                .map(|(u, h, p, _)| format!("{} ({})", if u.is_empty() { h.as_str() } else { u.as_str() }, p))
+                .map(|(u, h, p, _)| {
+                    format!(
+                        "{} ({})",
+                        if u.is_empty() { h.as_str() } else { u.as_str() },
+                        p
+                    )
+                })
                 .unwrap_or_default();
             let mut lines = vec![format!("─ MOD ACTIONS: {} ─", target)];
             lines.push(" 1: ban".to_string());
@@ -469,6 +523,8 @@ mod bracket_tests {
             user_uuid7: String::new(),
             content: "hi".into(),
             image_art: None,
+            image_frames: None,
+            image_frame_delays_ms: None,
             image_status: None,
             added_at: Instant::now(),
         }
@@ -537,7 +593,10 @@ mod bracket_tests {
         cfg.show_score_color = true;
         let b = bracket_content(&msg, &cfg);
         assert!(b.contains("42p"), "score must render beside the name: {b}");
-        assert!(b.contains("\x1b[36m"), "score colored when the color toggle is on");
+        assert!(
+            b.contains("\x1b[36m"),
+            "score colored when the color toggle is on"
+        );
         // The score sits after the name (beside it), before the `(rank)` text.
         assert!(
             b.find("42p").unwrap() < b.find("(opal)").unwrap(),
@@ -554,5 +613,47 @@ mod bracket_tests {
         cfg.show_score = false;
         let b = bracket_content(&msg, &cfg);
         assert!(!b.contains("42p"), "score hidden when toggled off: {b}");
+    }
+
+    #[test]
+    fn current_frame_single_frame_is_constant() {
+        let frames = vec!["only".to_string()];
+        assert_eq!(
+            current_frame(&frames, &[100], std::time::Duration::from_millis(500)),
+            "only"
+        );
+    }
+
+    #[test]
+    fn current_frame_cycles_with_unequal_delays() {
+        let frames = vec!["a".to_string(), "b".to_string()];
+        let delays = [100u32, 300u32];
+        let d = |ms: u64| std::time::Duration::from_millis(ms);
+        // Boundaries: [0,100) -> a, [100,400) -> b, then wraps to a.
+        assert_eq!(current_frame(&frames, &delays, d(0)), "a");
+        assert_eq!(current_frame(&frames, &delays, d(99)), "a");
+        assert_eq!(current_frame(&frames, &delays, d(100)), "b");
+        assert_eq!(current_frame(&frames, &delays, d(399)), "b");
+        assert_eq!(current_frame(&frames, &delays, d(400)), "a");
+        assert_eq!(current_frame(&frames, &delays, d(500)), "b");
+    }
+
+    #[test]
+    fn current_frame_mismatched_delays_falls_back_to_first() {
+        let frames = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(
+            current_frame(&frames, &[100], std::time::Duration::from_millis(250)),
+            "a"
+        );
+    }
+
+    #[test]
+    fn current_frame_zero_total_falls_back_to_first() {
+        let frames = vec!["a".to_string(), "b".to_string()];
+        let delays = [0u32, 0u32];
+        assert_eq!(
+            current_frame(&frames, &delays, std::time::Duration::from_millis(250)),
+            "a"
+        );
     }
 }

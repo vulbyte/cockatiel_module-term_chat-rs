@@ -16,8 +16,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::{
     event::{KeyCode, KeyEvent},
-    terminal,
-    ExecutableCommand,
+    terminal, ExecutableCommand,
 };
 use regex::Regex;
 use tokio::sync::{mpsc, Mutex, RwLock};
@@ -46,110 +45,123 @@ fn build_message_item(
     emoji_regexes: &HashMap<String, Regex>,
     emoji_enabled: bool,
 ) -> Option<ChatMessageItem> {
-    let (platform, content, username, name_color, rank, rank_value, score, reprimanded, role_badges, user_handle, user_uuid7, message_uuid7, stage) =
-        match payload {
-            ModulePayload::MessagePostProcess(pp) => {
-                let raw = pp.raw_message.as_ref();
-                let user_data = raw.and_then(|cm| cm.user_data.as_ref());
-                let username = user_data
-                    .map(|ud| ud.username.clone())
-                    .filter(|u| !u.is_empty())
-                    .or_else(|| raw.map(|cm| cm.user_uuid7.clone()))
-                    .unwrap_or_default();
-                let styling = user_data.and_then(|ud| ud.styling.as_ref());
-                let name_color = styling
-                    .and_then(|st| st.css_properties.get("color"))
-                    .cloned()
-                    .unwrap_or_default();
-                let rank = styling
-                    .and_then(|st| st.css_properties.get("rank"))
-                    .cloned()
-                    .unwrap_or_default();
-                let rank_value = styling
-                    .and_then(|st| st.css_properties.get("rank_value"))
-                    .and_then(|s| s.parse::<f32>().ok())
-                    .unwrap_or(0.0);
-                let score = styling
-                    .and_then(|st| st.css_properties.get("score"))
-                    .and_then(|s| s.parse::<i32>().ok())
-                    .unwrap_or(0);
-                let reprimanded = styling
-                    .and_then(|st| st.css_properties.get("reprimands"))
-                    .and_then(|s| s.parse::<i32>().ok())
-                    .map(|n| n > 0)
-                    .unwrap_or(false);
-                let role_badges = user_data.map(role_badges_of).unwrap_or_default();
-                let content = if !pp.processed_message.is_empty() {
-                    pp.processed_message.clone()
-                } else {
-                    raw.map(|cm| cm.raw_message.clone()).unwrap_or_default()
-                };
-                (
-                    raw.map(|cm| cm.platform.clone()).unwrap_or_default(),
-                    content,
-                    username,
-                    name_color,
-                    rank,
-                    rank_value,
-                    score,
-                    reprimanded,
-                    role_badges,
-                    raw.map(|cm| cm.user_uuid7.clone()).unwrap_or_default(),
-                    raw.map(|cm| cm.user_uuid7.clone()).unwrap_or_default(),
-                    pp.message_uuid7.clone(),
-                    "post",
-                )
-            }
-            ModulePayload::MessagePreProcess(pre) => {
-                let raw = pre.raw_message.as_ref();
-                let user_data = raw.and_then(|cm| cm.user_data.as_ref());
-                let username = user_data
-                    .map(|ud| ud.username.clone())
-                    .filter(|u| !u.is_empty())
-                    .or_else(|| raw.map(|cm| cm.user_uuid7.clone()))
-                    .unwrap_or_default();
-                let styling = user_data.and_then(|ud| ud.styling.as_ref());
-                let name_color = styling
-                    .and_then(|st| st.css_properties.get("color"))
-                    .cloned()
-                    .unwrap_or_default();
-                let rank = styling
-                    .and_then(|st| st.css_properties.get("rank"))
-                    .cloned()
-                    .unwrap_or_default();
-                let rank_value = styling
-                    .and_then(|st| st.css_properties.get("rank_value"))
-                    .and_then(|s| s.parse::<f32>().ok())
-                    .unwrap_or(0.0);
-                let score = styling
-                    .and_then(|st| st.css_properties.get("score"))
-                    .and_then(|s| s.parse::<i32>().ok())
-                    .unwrap_or(0);
-                let reprimanded = styling
-                    .and_then(|st| st.css_properties.get("reprimands"))
-                    .and_then(|s| s.parse::<i32>().ok())
-                    .map(|n| n > 0)
-                    .unwrap_or(false);
-                let role_badges = user_data.map(role_badges_of).unwrap_or_default();
-                let content = raw.map(|cm| cm.raw_message.clone()).unwrap_or_default();
-                (
-                    raw.map(|cm| cm.platform.clone()).unwrap_or_default(),
-                    content,
-                    username,
-                    name_color,
-                    rank,
-                    rank_value,
-                    score,
-                    reprimanded,
-                    role_badges,
-                    raw.map(|cm| cm.user_uuid7.clone()).unwrap_or_default(),
-                    raw.map(|cm| cm.user_uuid7.clone()).unwrap_or_default(),
-                    pre.message_uuid7.clone(),
-                    "pre",
-                )
-            }
-            _ => return None,
-        };
+    let (
+        platform,
+        content,
+        username,
+        name_color,
+        rank,
+        rank_value,
+        score,
+        reprimanded,
+        role_badges,
+        user_handle,
+        user_uuid7,
+        message_uuid7,
+        stage,
+    ) = match payload {
+        ModulePayload::MessagePostProcess(pp) => {
+            let raw = pp.raw_message.as_ref();
+            let user_data = raw.and_then(|cm| cm.user_data.as_ref());
+            let username = user_data
+                .map(|ud| ud.username.clone())
+                .filter(|u| !u.is_empty())
+                .or_else(|| raw.map(|cm| cm.user_uuid7.clone()))
+                .unwrap_or_default();
+            let styling = user_data.and_then(|ud| ud.styling.as_ref());
+            let name_color = styling
+                .and_then(|st| st.css_properties.get("color"))
+                .cloned()
+                .unwrap_or_default();
+            let rank = styling
+                .and_then(|st| st.css_properties.get("rank"))
+                .cloned()
+                .unwrap_or_default();
+            let rank_value = styling
+                .and_then(|st| st.css_properties.get("rank_value"))
+                .and_then(|s| s.parse::<f32>().ok())
+                .unwrap_or(0.0);
+            let score = styling
+                .and_then(|st| st.css_properties.get("score"))
+                .and_then(|s| s.parse::<i32>().ok())
+                .unwrap_or(0);
+            let reprimanded = styling
+                .and_then(|st| st.css_properties.get("reprimands"))
+                .and_then(|s| s.parse::<i32>().ok())
+                .map(|n| n > 0)
+                .unwrap_or(false);
+            let role_badges = user_data.map(role_badges_of).unwrap_or_default();
+            let content = if !pp.processed_message.is_empty() {
+                pp.processed_message.clone()
+            } else {
+                raw.map(|cm| cm.raw_message.clone()).unwrap_or_default()
+            };
+            (
+                raw.map(|cm| cm.platform.clone()).unwrap_or_default(),
+                content,
+                username,
+                name_color,
+                rank,
+                rank_value,
+                score,
+                reprimanded,
+                role_badges,
+                raw.map(|cm| cm.user_uuid7.clone()).unwrap_or_default(),
+                raw.map(|cm| cm.user_uuid7.clone()).unwrap_or_default(),
+                pp.message_uuid7.clone(),
+                "post",
+            )
+        }
+        ModulePayload::MessagePreProcess(pre) => {
+            let raw = pre.raw_message.as_ref();
+            let user_data = raw.and_then(|cm| cm.user_data.as_ref());
+            let username = user_data
+                .map(|ud| ud.username.clone())
+                .filter(|u| !u.is_empty())
+                .or_else(|| raw.map(|cm| cm.user_uuid7.clone()))
+                .unwrap_or_default();
+            let styling = user_data.and_then(|ud| ud.styling.as_ref());
+            let name_color = styling
+                .and_then(|st| st.css_properties.get("color"))
+                .cloned()
+                .unwrap_or_default();
+            let rank = styling
+                .and_then(|st| st.css_properties.get("rank"))
+                .cloned()
+                .unwrap_or_default();
+            let rank_value = styling
+                .and_then(|st| st.css_properties.get("rank_value"))
+                .and_then(|s| s.parse::<f32>().ok())
+                .unwrap_or(0.0);
+            let score = styling
+                .and_then(|st| st.css_properties.get("score"))
+                .and_then(|s| s.parse::<i32>().ok())
+                .unwrap_or(0);
+            let reprimanded = styling
+                .and_then(|st| st.css_properties.get("reprimands"))
+                .and_then(|s| s.parse::<i32>().ok())
+                .map(|n| n > 0)
+                .unwrap_or(false);
+            let role_badges = user_data.map(role_badges_of).unwrap_or_default();
+            let content = raw.map(|cm| cm.raw_message.clone()).unwrap_or_default();
+            (
+                raw.map(|cm| cm.platform.clone()).unwrap_or_default(),
+                content,
+                username,
+                name_color,
+                rank,
+                rank_value,
+                score,
+                reprimanded,
+                role_badges,
+                raw.map(|cm| cm.user_uuid7.clone()).unwrap_or_default(),
+                raw.map(|cm| cm.user_uuid7.clone()).unwrap_or_default(),
+                pre.message_uuid7.clone(),
+                "pre",
+            )
+        }
+        _ => return None,
+    };
 
     let content = if emoji_enabled {
         emoji::apply(emoji_map, emoji_regexes, &content)
@@ -187,6 +199,8 @@ fn build_message_item(
         user_uuid7,
         content,
         image_art: None,
+        image_frames: None,
+        image_frame_delays_ms: None,
         image_status: None,
         added_at: Instant::now(),
     })
@@ -236,7 +250,10 @@ fn spawn_image_render(
             if let Some(m) = msgs.iter_mut().find(|m| m.id == id) {
                 m.image_status = Some("rank too low".to_string());
             }
-            warn!("[image] not embedding for {}: rank '{}' (value {:.3}) below '{}'", item.username, item.rank, item.rank_value, min_rank);
+            warn!(
+                "[image] not embedding for {}: rank '{}' (value {:.3}) below '{}'",
+                item.username, item.rank, item.rank_value, min_rank
+            );
             return;
         }
 
@@ -247,6 +264,14 @@ fn spawn_image_render(
                     let mut msgs = messages.lock().await;
                     if let Some(m) = msgs.iter_mut().find(|m| m.id == id) {
                         m.image_art = Some(art);
+                    }
+                    return;
+                }
+                images::RenderResult::Frames(frames, delays) => {
+                    let mut msgs = messages.lock().await;
+                    if let Some(m) = msgs.iter_mut().find(|m| m.id == id) {
+                        m.image_frames = Some(frames);
+                        m.image_frame_delays_ms = Some(delays);
                     }
                     return;
                 }
@@ -331,8 +356,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(images::load_map(&config.image_map_path));
     let image_regexes: Arc<HashMap<String, Regex>> =
         Arc::new(images::compile_map_regexes(image_map.as_ref()));
-    let audio_player =
-        audio::AudioPlayer::start(config.audio_volume, config.max_audio_seconds);
+    let audio_player = audio::AudioPlayer::start(config.audio_volume, config.max_audio_seconds);
 
     // Read task: engine -> UI, with automatic reconnect (exponential backoff).
     {
@@ -412,8 +436,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         read = None;
                     }
                     Some(Ok(WsMessage::Binary(data))) => {
-                        let Ok(container) = ContainerForModule::decode(data.as_ref())
-                        else {
+                        let Ok(container) = ContainerForModule::decode(data.as_ref()) else {
                             continue;
                         };
                         let Some(payload) = container.payload else {
@@ -434,13 +457,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // chain immediately instead of waiting out the ack timeout.
                         let ack_uuid: Option<String> = match &payload {
                             ModulePayload::MessagePreProcess(m) => {
-                                if m.message_uuid7.is_empty() { None } else { Some(m.message_uuid7.clone()) }
+                                if m.message_uuid7.is_empty() {
+                                    None
+                                } else {
+                                    Some(m.message_uuid7.clone())
+                                }
                             }
                             ModulePayload::MessageInProcess(m) => {
-                                if m.message_uuid7.is_empty() { None } else { Some(m.message_uuid7.clone()) }
+                                if m.message_uuid7.is_empty() {
+                                    None
+                                } else {
+                                    Some(m.message_uuid7.clone())
+                                }
                             }
                             ModulePayload::MessagePostProcess(m) => {
-                                if m.message_uuid7.is_empty() { None } else { Some(m.message_uuid7.clone()) }
+                                if m.message_uuid7.is_empty() {
+                                    None
+                                } else {
+                                    Some(m.message_uuid7.clone())
+                                }
                             }
                             _ => None,
                         };
@@ -459,9 +494,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // answers them.
                             ModulePayload::Prompt(_) => {}
                             other => {
-                                if let Some(item) =
-                                    build_message_item(&other, &emoji_map, &emoji_regexes, emoji_enabled)
-                                {
+                                if let Some(item) = build_message_item(
+                                    &other,
+                                    &emoji_map,
+                                    &emoji_regexes,
+                                    emoji_enabled,
+                                ) {
                                     // The item id is keyed by the engine message uuid7 (per pipeline
                                     // stage), so an engine re-delivery of the
                                     // same stage coalesces: don't push a message
@@ -486,7 +524,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if play_audio {
                                     if let ModulePayload::MessagePostProcess(pp) = &other {
                                         if !pp.audio.is_empty() {
-                                            audio_player.play_inline(&pp.message_uuid7, pp.audio.clone());
+                                            audio_player
+                                                .play_inline(&pp.message_uuid7, pp.audio.clone());
                                         }
                                     }
                                 }
@@ -557,7 +596,8 @@ async fn run_tui(
     let mut ui = Ui::new();
     let mut login = login::load_or_empty();
 
-    let mut interval = tokio::time::interval(Duration::from_millis(250));
+    let mut period_ms = 250u64;
+    let mut interval = tokio::time::interval(Duration::from_millis(period_ms));
     #[allow(unused_assignments)]
     let mut needs_redraw = true;
     loop {
@@ -576,6 +616,23 @@ async fn run_tui(
                     None => break,
                 }
             }
+        }
+
+        // An animated image advances with wall-clock time, so tick faster while
+        // one is on screen; otherwise the 250ms cadence is plenty. The interval
+        // is only recreated on a period change (its first tick fires at once,
+        // which would otherwise busy-loop).
+        let desired_ms = {
+            let msgs = messages.lock().await;
+            if msgs.iter().any(|m| m.image_frames.is_some()) {
+                100
+            } else {
+                250
+            }
+        };
+        if desired_ms != period_ms {
+            period_ms = desired_ms;
+            interval = tokio::time::interval(Duration::from_millis(period_ms));
         }
 
         // Drain the easing queue into the display buffer (scroll-freeze aware).
@@ -616,7 +673,13 @@ async fn run_tui(
             let before = msgs.len();
             msgs.retain(|m| {
                 let age = fade_now.saturating_duration_since(m.added_at);
-                fade_action(age, config.message_fade_secs, mode, config.fade_dim_fraction, config.fade_dim_max_secs) != FadeAction::Remove
+                fade_action(
+                    age,
+                    config.message_fade_secs,
+                    mode,
+                    config.fade_dim_fraction,
+                    config.fade_dim_max_secs,
+                ) != FadeAction::Remove
             });
             if msgs.len() != before {
                 ui.scroll = ui.scroll.min(msgs.len());
@@ -715,23 +778,22 @@ async fn handle_key(
             KeyCode::Down | KeyCode::Char('j') => {
                 ui.scroll = ui.scroll.saturating_sub(1);
             }
-            KeyCode::Enter
-                if login.can_moderate() => {
-                    let len = messages.lock().await.len();
-                    let idx = len.saturating_sub(ui.scroll + 1);
-                    if idx < len {
-                        let msgs = messages.lock().await;
-                        let item = &msgs[idx];
-                        ui.action_target = Some((
-                            item.username.clone(),
-                            item.user_handle.clone(),
-                            item.platform.clone(),
-                            item.user_uuid7.clone(),
-                        ));
-                        ui.result_note.clear();
-                        ui.mode = UiMode::ActionMenu;
-                    }
+            KeyCode::Enter if login.can_moderate() => {
+                let len = messages.lock().await.len();
+                let idx = len.saturating_sub(ui.scroll + 1);
+                if idx < len {
+                    let msgs = messages.lock().await;
+                    let item = &msgs[idx];
+                    ui.action_target = Some((
+                        item.username.clone(),
+                        item.user_handle.clone(),
+                        item.platform.clone(),
+                        item.user_uuid7.clone(),
+                    ));
+                    ui.result_note.clear();
+                    ui.mode = UiMode::ActionMenu;
                 }
+            }
             _ => {}
         },
         UiMode::LoginMenu => match code {
@@ -807,7 +869,10 @@ async fn handle_key(
                 ui.timeout_draft.pop();
             }
             KeyCode::Enter => {
-                let secs: i32 = ui.timeout_draft.parse().unwrap_or(config.default_timeout_secs);
+                let secs: i32 = ui
+                    .timeout_draft
+                    .parse()
+                    .unwrap_or(config.default_timeout_secs);
                 send_mod_action(engine, ui, login, "mod_timeout", Some(secs)).await;
                 ui.mode = UiMode::Chat;
             }
@@ -840,7 +905,10 @@ async fn handle_key(
                     // Send through the CURRENT engine handle (may have been
                     // swapped by a reconnect).
                     let eng = engine.read().await.clone();
-                    match eng.send_message(&ui.target_platform, &text, Some(actor)).await {
+                    match eng
+                        .send_message(&ui.target_platform, &text, Some(actor))
+                        .await
+                    {
                         Ok(()) => ui.result_note = "sent".to_string(),
                         Err(e) => ui.result_note = format!("send failed: {}", e),
                     }
@@ -935,4 +1003,3 @@ async fn send_mod_action(
         }
     }
 }
-

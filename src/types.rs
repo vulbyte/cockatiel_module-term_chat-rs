@@ -25,6 +25,11 @@ pub struct ChatMessageItem {
     pub content: String,
     /// Rendered ascii art for an image in the message (async, may fill in later).
     pub image_art: Option<String>,
+    /// Ascii frames for an animated image (GIF/APNG), played by the renderer.
+    /// `image_art` stays `None` for animated images; `image_frames` drives them.
+    pub image_frames: Option<Vec<String>>,
+    /// Per-frame durations (ms) matching `image_frames` (u32 for 32-bit systems).
+    pub image_frame_delays_ms: Option<Vec<u32>>,
     /// Why an image was NOT shown (e.g. "rank too low", "embedding not allowed",
     /// "conversion failed"). `None` = no image attempted, or rendered fine.
     /// The renderer shows a plain `<image>` placeholder when this is Some.

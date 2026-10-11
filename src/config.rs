@@ -89,6 +89,10 @@ pub struct ChatConfig {
     /// Delay between audio fetch retries (ms).
     #[serde(default = "default_audio_fetch_retry_delay_ms")]
     pub audio_fetch_retry_delay_ms: u32,
+    /// Show the failure reason inside the `<image>` placeholder (e.g.
+    /// `<image: not an image>`) to diagnose why an embed didn't appear.
+    #[serde(default = "default_image_show_errors")]
+    pub image_show_errors: bool,
     /// Hard cap on a single downloaded image's bytes.
     #[serde(default = "default_image_max_bytes")]
     pub image_max_bytes: usize,
@@ -172,6 +176,10 @@ fn default_audio_fetch_retries() -> u32 {
 
 fn default_audio_fetch_retry_delay_ms() -> u32 {
     1000
+}
+
+fn default_image_show_errors() -> bool {
+    false
 }
 
 fn default_image_max_bytes() -> usize {
@@ -277,6 +285,7 @@ impl Default for ChatConfig {
             show_score_color: true,
             audio_fetch_retries: 3,
             audio_fetch_retry_delay_ms: 800,
+            image_show_errors: false,
             image_max_bytes: 10 * 1024 * 1024,
             image_max_concurrent: 8,
             image_timeout_secs: 15,
@@ -328,6 +337,7 @@ impl ChatConfig {
                             "show_score_color": true,
                             "audio_fetch_retries": 3,
                             "audio_fetch_retry_delay_ms": 800,
+                            "image_show_errors": false,
                             "image_max_bytes": 10 * 1024 * 1024,
                             "image_max_concurrent": 8,
                             "image_timeout_secs": 15,

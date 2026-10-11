@@ -18,7 +18,12 @@ pub struct EasingQueue {
 }
 
 impl EasingQueue {
-    pub fn new(enabled: bool, target_per_min: f32, max_buffered: usize, idle_flush_secs: u32) -> Self {
+    pub fn new(
+        enabled: bool,
+        target_per_min: f32,
+        max_buffered: usize,
+        idle_flush_secs: u32,
+    ) -> Self {
         Self {
             enabled,
             target_per_min: if target_per_min > 0.0 {
@@ -98,6 +103,8 @@ mod tests {
             user_uuid7: String::new(),
             content: String::new(),
             image_art: None,
+            image_frames: None,
+            image_frame_delays_ms: None,
             image_status: None,
             added_at: Instant::now(),
         }
@@ -111,10 +118,18 @@ mod tests {
         }
         // Cap 3: only the NEWEST 3 are still pending; the oldest 7 were dropped.
         for i in 0..7 {
-            assert!(!q.contains_id(&format!("m{}", i)), "m{} should be dropped", i);
+            assert!(
+                !q.contains_id(&format!("m{}", i)),
+                "m{} should be dropped",
+                i
+            );
         }
         for i in 7..10 {
-            assert!(q.contains_id(&format!("m{}", i)), "m{} should be pending", i);
+            assert!(
+                q.contains_id(&format!("m{}", i)),
+                "m{} should be pending",
+                i
+            );
         }
     }
 
