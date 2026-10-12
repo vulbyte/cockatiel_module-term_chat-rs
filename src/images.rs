@@ -8,11 +8,16 @@ use regex::Regex;
 use tokio::sync::{Mutex, Semaphore};
 
 /// The raw image-URL pattern is fixed; compile it once instead of per message.
+/// The second alternative matches klipy/tenor media explicitly (any subdomain),
+/// covering `.mp4`/`.webm` and extension-less share URLs without grabbing
+/// arbitrary links.
 fn image_url_regex() -> &'static Regex {
     static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"(?i)https?://[^\s<>]+?\.(?:png|apng|jpe?g|gif|webp)(?:\?[^\s<>]*)?")
-            .expect("image URL regex must compile")
+        Regex::new(
+            r"(?i)https?://(?:[^\s<>]+?\.(?:png|apng|jpe?g|gif|webp)(?:\?[^\s<>]*)?|(?:[a-z0-9-]+\.)*(?:klipy|tenor)\.com/[^\s<>]*)",
+        )
+        .expect("image URL regex must compile")
     })
 }
 
@@ -115,6 +120,55 @@ fn content_type_is_image(ctype: &str) -> bool {
     }
     let ct = ctype.split(';').next().unwrap_or(ctype).trim();
     ct.starts_with("image/") || ct == "application/octet-stream" || ct.starts_with("binary/")
+}
+
+/// Lowercased URL path (scheme + host stripped, query/fragment removed).
+fn url_path_lower(url: &str) -> String {
+    let after_scheme = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let path = after_scheme.split(['?', '#']).next().unwrap_or("");
+    path.to_ascii_lowercase()
+}
+
+/// True when `url`'s host is klipy.com or tenor.com (any subdomain).
+fn is_klipy_or_tenor(url: &str) -> bool {
+    let after_scheme = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let host = after_scheme.split(['/', '?', '#']).next().unwrap_or("");
+    let host = host.rsplit('@').next().unwrap_or(host);
+    let host = host.split(':').next().unwrap_or(host);
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    host == "klipy.com"
+        || host.ends_with(".klipy.com")
+        || host == "tenor.com"
+        || host.ends_with(".tenor.com")
+}
+
+/// True when the URL path ends in an extension the `image` crate can decode.
+fn has_image_extension(url: &str) -> bool {
+    let p = url_path_lower(url);
+    [".png", ".apng", ".jpg", ".jpeg", ".gif", ".webp"]
+        .iter()
+        .any(|e| p.ends_with(e))
+}
+
+/// Rewrite a klipy/tenor `.mp4`/`.webm` media URL to its sibling `.gif` URL
+/// (preserving any query string). Returns `None` for a non-video URL.
+fn gif_sibling_url(url: &str) -> Option<String> {
+    let (base, query) = match url.split_once('?') {
+        Some((b, q)) => (b, Some(q)),
+        None => (url, None),
+    };
+    let lower = base.to_ascii_lowercase();
+    let new_base = if lower.ends_with(".mp4") {
+        format!("{}.gif", &base[..base.len() - 4])
+    } else if lower.ends_with(".webm") {
+        format!("{}.gif", &base[..base.len() - 5])
+    } else {
+        return None;
+    };
+    Some(match query {
+        Some(q) => format!("{}?{}", new_base, q),
+        None => new_base,
+    })
 }
 
 /// True when an external converter is runnable. An explicit path (contains a
@@ -232,6 +286,23 @@ impl ImageRenderer {
     }
 
     async fn render_uncached(&self, url: &str, cols: u16, rows: u16) -> RenderResult {
+        // Klipy/Tenor serve GIFs as `.mp4`/`.webm` which the `image` crate
+        // cannot decode: try the sibling `.gif` first, decode direct image
+        // URLs, and skip extension-less share URLs (needs their API).
+        let owned_target;
+        let target = if is_klipy_or_tenor(url) {
+            if let Some(gif) = gif_sibling_url(url) {
+                owned_target = gif;
+                owned_target.as_str()
+            } else if has_image_extension(url) {
+                url
+            } else {
+                return RenderResult::Reason("video gif not supported".to_string());
+            }
+        } else {
+            url
+        };
+
         // Bound concurrent downloads so a fast chat can't spawn unbounded HTTP
         // fetches / in-flight byte buffers.
         let permit = match self.download_semaphore.acquire().await {
@@ -245,7 +316,7 @@ impl ImageRenderer {
             )
             .build()
             .unwrap_or_default();
-        let mut req = client.get(url);
+        let mut req = client.get(target);
         if !self.referer.is_empty() {
             req = req.header("Referer", self.referer.as_str());
         }
@@ -265,13 +336,17 @@ impl ImageRenderer {
             ));
         }
 
-        // Not an image → nothing to embed.
+        // Not an image → nothing to embed. Video (klipy/tenor `.mp4`/`.webm`
+        // that had no decodable `.gif` sibling) is explicitly unsupported.
         let ctype = resp
             .headers()
             .get("content-type")
             .and_then(|v| v.to_str().ok())
             .unwrap_or_default()
             .to_ascii_lowercase();
+        if ctype.starts_with("video/") {
+            return RenderResult::Reason("video gif not supported".to_string());
+        }
         if !content_type_is_image(&ctype) {
             return RenderResult::Reason("not an image".to_string());
         }
@@ -445,9 +520,12 @@ fn extract_frames(bytes: &[u8], out_w: u32, out_h: u32) -> Option<RenderResult> 
 /// Compute the ascii cell dimensions so the image's longest dimension fits
 /// within `fraction` of the terminal (width and height), preserving aspect
 /// ratio (terminal cells are ~2:1 so rows = H/2 in cell units). Never upscales.
+/// The height is additionally capped at `rows - 6` so the art still fits the
+/// chat area alongside the bracket line, the content line and the spacer.
 fn fit_dimensions(cols: u16, rows: u16, iw: u32, ih: u32, fraction: f32) -> (u32, u32) {
     let max_w = ((cols as f32 * fraction) as usize).max(10);
-    let max_h = ((rows as f32 * fraction) as usize).max(3);
+    let height_cap = rows.saturating_sub(6) as f32;
+    let max_h = ((rows as f32 * fraction).min(height_cap) as usize).max(3);
     let cell_w = iw as f32;
     let cell_h = ih as f32 / 2.0;
     let scale = (max_w as f32 / cell_w).min(max_h as f32 / cell_h).min(1.0);
@@ -493,12 +571,12 @@ mod tests {
     #[test]
     fn fit_dimensions_tracks_terminal_resize() {
         // 400x400 square: cell = 400 wide x 200 tall.
-        // 120x30 terminal -> 0.8 => max 96x24 => scale = min(96/400, 24/200) = 0.12 -> 48x24
+        // 120x30 terminal -> 0.8 => max 96x24 (cap rows-6 = 24) => scale = min(96/400, 24/200) = 0.12 -> 48x24
         let (w1, h1) = fit_dimensions(120, 30, 400, 400, 0.8);
         assert_eq!((w1, h1), (48, 24));
-        // Resized to 60x20 -> 0.8 => max 48x16 => scale = min(48/400, 16/200) = 0.08 -> 32x16
+        // Resized to 60x20 -> 0.8 => max 48x16, capped at rows-6 = 14 => scale = min(48/400, 14/200) = 0.07 -> 28x14
         let (w2, h2) = fit_dimensions(60, 20, 400, 400, 0.8);
-        assert_eq!((w2, h2), (32, 16));
+        assert_eq!((w2, h2), (28, 14));
         // A resize must produce a different size (so the cache re-renders).
         assert_ne!((w1, h1), (w2, h2));
 
@@ -508,6 +586,73 @@ mod tests {
         // Never upscale a tiny image.
         // 40x40: cell = 40 x 20; at 120x30 -> scale would be >1, capped at 1 -> 40x20
         assert_eq!(fit_dimensions(120, 30, 40, 40, 0.8), (40, 20));
+    }
+
+    #[test]
+    fn square_source_fits_chat_area() {
+        use crate::render::{rows_needed, RenderedLine};
+        for rows in [24u16, 30u16] {
+            let (w, h) = fit_dimensions(120, rows, 400, 400, 0.8);
+            // A one-line bracket + one-line content, then the art rows.
+            let art: String = (0..h).map(|_| " ".repeat(w as usize) + "\n").collect();
+            let line = RenderedLine {
+                username: "u".to_string(),
+                name_color: String::new(),
+                bracket_content: "u".to_string(),
+                content: "hello".to_string(),
+                image_art: Some(art),
+                image_status: None,
+                dimmed: false,
+            };
+            let needed = rows_needed(&line, 120);
+            assert!(
+                needed <= rows as usize - 3,
+                "rows={rows} art_h={h} needed={needed}"
+            );
+        }
+    }
+
+    #[test]
+    fn image_url_regex_matches_klipy_and_tenor() {
+        let re = image_url_regex();
+        for u in [
+            "https://static.klipy.com/abc/def/x.mp4",
+            "https://media.tenor.com/abc/x.webm",
+            "https://klipy.com/gifs/funny-cat",
+            "https://tenor.com/view/funny-cat-123",
+        ] {
+            assert!(re.is_match(u), "should match {u}");
+        }
+        assert!(!re.is_match("https://random.example.com/x.mp4"));
+        assert!(!re.is_match("https://cdn.example.com/video.webm"));
+    }
+
+    #[test]
+    fn gif_sibling_url_rewrites_video_extensions() {
+        assert_eq!(
+            gif_sibling_url("https://static.klipy.com/a/b/x.mp4").as_deref(),
+            Some("https://static.klipy.com/a/b/x.gif")
+        );
+        assert_eq!(
+            gif_sibling_url("https://media.tenor.com/a/x.webm").as_deref(),
+            Some("https://media.tenor.com/a/x.gif")
+        );
+        assert_eq!(
+            gif_sibling_url("https://static.klipy.com/a/x.mp4?t=1").as_deref(),
+            Some("https://static.klipy.com/a/x.gif?t=1")
+        );
+        assert_eq!(gif_sibling_url("https://static.klipy.com/a/x.gif"), None);
+        assert_eq!(gif_sibling_url("https://x/a.png"), None);
+    }
+
+    #[test]
+    fn klipy_host_detection_is_scoped() {
+        assert!(is_klipy_or_tenor("https://static.klipy.com/x.mp4"));
+        assert!(is_klipy_or_tenor("https://klipy.com/gifs/x"));
+        assert!(is_klipy_or_tenor("https://media.tenor.com/x.gif"));
+        assert!(is_klipy_or_tenor("https://tenor.com/view/x"));
+        assert!(!is_klipy_or_tenor("https://notklipy.com/x.mp4"));
+        assert!(!is_klipy_or_tenor("https://example.com/klipy.com/x.mp4"));
     }
 
     #[test]

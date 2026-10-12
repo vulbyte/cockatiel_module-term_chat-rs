@@ -114,7 +114,7 @@ fn ceil_div(len: usize, width: usize) -> usize {
     len.max(1).div_ceil(width)
 }
 
-fn rows_needed(line: &RenderedLine, cols: usize) -> usize {
+pub(crate) fn rows_needed(line: &RenderedLine, cols: usize) -> usize {
     let bracket_rows = ceil_div(line.bracket_content.chars().count(), cols);
     let content_rows = ceil_div(line.content.chars().count(), cols);
     let image_rows = line

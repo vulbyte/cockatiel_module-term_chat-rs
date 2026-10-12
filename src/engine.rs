@@ -11,9 +11,7 @@ use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
 use crate::login::Roles;
 
 type WsSink = futures_util::stream::SplitSink<
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     WsMessage,
 >;
 
@@ -88,7 +86,10 @@ impl EngineHandle {
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
-                return Err(format!("timed out waiting for query response '{}'", query_id));
+                return Err(format!(
+                    "timed out waiting for query response '{}'",
+                    query_id
+                ));
             }
             match tokio::time::timeout(remaining, rx.recv()).await {
                 Ok(Ok(res)) => {
@@ -97,7 +98,12 @@ impl EngineHandle {
                     }
                 }
                 Ok(Err(_)) => return Err("query response channel closed".to_string()),
-                Err(_) => return Err(format!("timed out waiting for query response '{}'", query_id)),
+                Err(_) => {
+                    return Err(format!(
+                        "timed out waiting for query response '{}'",
+                        query_id
+                    ))
+                }
             }
         }
     }
@@ -112,6 +118,34 @@ impl EngineHandle {
             message_uuid7: message_uuid7.to_string(),
         }))
         .await
+    }
+
+    /// Echo a post-process stage result back to the engine. The engine clears
+    /// the pending stage entry on this echo (same `message_uuid7`); the receipt
+    /// `MessageAck` alone only stops resends.
+    pub async fn echo_post_process(&self, msg: &MessagePostProcess) -> Result<(), String> {
+        match post_process_echo(msg) {
+            Some(payload) => self.send_payload(payload).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Echo a pre-process stage result back to the engine (see
+    /// [`Self::echo_post_process`]).
+    pub async fn echo_pre_process(&self, msg: &MessagePreProcess) -> Result<(), String> {
+        match pre_process_echo(msg) {
+            Some(payload) => self.send_payload(payload).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Echo an in-process stage result back to the engine (see
+    /// [`Self::echo_post_process`]).
+    pub async fn echo_in_process(&self, msg: &MessageInProcess) -> Result<(), String> {
+        match in_process_echo(msg) {
+            Some(payload) => self.send_payload(payload).await,
+            None => Ok(()),
+        }
     }
 
     /// Ask the engine to log who we are + our platform-verified roles into the
@@ -142,10 +176,22 @@ impl EngineHandle {
             .map_err(|e| format!("bad verify_identity response: {}", e))?;
         let user = json.get("user").cloned().unwrap_or(serde_json::json!({}));
         Ok(Roles {
-            is_sponsor: user.get("is_sponsor").and_then(|v| v.as_bool()).unwrap_or(false),
-            is_moderator: user.get("is_moderator").and_then(|v| v.as_bool()).unwrap_or(false),
-            is_admin: user.get("is_admin").and_then(|v| v.as_bool()).unwrap_or(false),
-            is_owner: user.get("is_owner").and_then(|v| v.as_bool()).unwrap_or(false),
+            is_sponsor: user
+                .get("is_sponsor")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            is_moderator: user
+                .get("is_moderator")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            is_admin: user
+                .get("is_admin")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            is_owner: user
+                .get("is_owner")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
         })
     }
 
@@ -218,6 +264,113 @@ impl EngineHandle {
             }
             return Ok(map);
         }
-        Err(format!("adapter '{}' not found in module list", adapter_name))
+        Err(format!(
+            "adapter '{}' not found in module list",
+            adapter_name
+        ))
+    }
+}
+
+/// Build the stage-echo payload for an inbound post-process message. `None`
+/// when the uuid is empty (never echo a placeholder).
+fn post_process_echo(msg: &MessagePostProcess) -> Option<EnginePayload> {
+    if msg.message_uuid7.is_empty() {
+        return None;
+    }
+    Some(EnginePayload::MessagePostProcess(MessagePostProcess {
+        message_uuid7: msg.message_uuid7.clone(),
+        raw_message: msg.raw_message.clone(),
+        processed_message: msg.processed_message.clone(),
+        audio: msg.audio.clone(),
+        audio_type: msg.audio_type.clone(),
+    }))
+}
+
+/// Build the stage-echo payload for an inbound pre-process message.
+fn pre_process_echo(msg: &MessagePreProcess) -> Option<EnginePayload> {
+    if msg.message_uuid7.is_empty() {
+        return None;
+    }
+    Some(EnginePayload::MessagePreProcess(MessagePreProcess {
+        message_uuid7: msg.message_uuid7.clone(),
+        raw_message: msg.raw_message.clone(),
+        audio: msg.audio.clone(),
+        audio_type: msg.audio_type.clone(),
+    }))
+}
+
+/// Build the stage-echo payload for an inbound in-process message.
+fn in_process_echo(msg: &MessageInProcess) -> Option<EnginePayload> {
+    if msg.message_uuid7.is_empty() {
+        return None;
+    }
+    Some(EnginePayload::MessageInProcess(MessageInProcess {
+        message_uuid7: msg.message_uuid7.clone(),
+        raw_message: msg.raw_message.clone(),
+        processed_message: msg.processed_message.clone(),
+        abandon_message: msg.abandon_message,
+        audio: msg.audio.clone(),
+        audio_type: msg.audio_type.clone(),
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn post_process_echo_preserves_uuid_and_fields() {
+        let msg = MessagePostProcess {
+            message_uuid7: "abc-123".to_string(),
+            raw_message: None,
+            processed_message: "hi".to_string(),
+            audio: vec![1, 2, 3],
+            audio_type: "audio/mpeg".to_string(),
+        };
+        match post_process_echo(&msg) {
+            Some(EnginePayload::MessagePostProcess(echo)) => {
+                assert_eq!(echo.message_uuid7, "abc-123");
+                assert_eq!(echo.processed_message, "hi");
+                assert_eq!(echo.audio, vec![1, 2, 3]);
+                assert_eq!(echo.audio_type, "audio/mpeg");
+            }
+            other => panic!("expected MessagePostProcess echo, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stage_echoes_skip_empty_uuid() {
+        assert!(post_process_echo(&MessagePostProcess::default()).is_none());
+        assert!(pre_process_echo(&MessagePreProcess::default()).is_none());
+        assert!(in_process_echo(&MessageInProcess::default()).is_none());
+    }
+
+    #[test]
+    fn pre_and_in_process_echoes_match_stage_type() {
+        let pre = MessagePreProcess {
+            message_uuid7: "p1".to_string(),
+            raw_message: None,
+            audio: vec![],
+            audio_type: String::new(),
+        };
+        assert!(matches!(
+            pre_process_echo(&pre),
+            Some(EnginePayload::MessagePreProcess(_))
+        ));
+        let inp = MessageInProcess {
+            message_uuid7: "i1".to_string(),
+            raw_message: None,
+            processed_message: "x".to_string(),
+            abandon_message: true,
+            audio: vec![],
+            audio_type: String::new(),
+        };
+        match in_process_echo(&inp) {
+            Some(EnginePayload::MessageInProcess(echo)) => {
+                assert_eq!(echo.message_uuid7, "i1");
+                assert!(echo.abandon_message);
+            }
+            other => panic!("expected MessageInProcess echo, got {other:?}"),
+        }
     }
 }

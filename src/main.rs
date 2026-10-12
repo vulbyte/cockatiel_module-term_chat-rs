@@ -453,34 +453,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 .await;
                             continue;
                         }
-                        // Acknowledge pipeline messages so the engine advances the
-                        // chain immediately instead of waiting out the ack timeout.
-                        let ack_uuid: Option<String> = match &payload {
+                        // Reply to each pipeline stage with its stage-echo (the
+                        // engine clears the pending stage on the echo) plus the
+                        // receipt ping (stops resends). Send both as early as
+                        // possible, before any per-frame image/audio work.
+                        match &payload {
                             ModulePayload::MessagePreProcess(m) => {
-                                if m.message_uuid7.is_empty() {
-                                    None
-                                } else {
-                                    Some(m.message_uuid7.clone())
-                                }
+                                let _ = engine.echo_pre_process(m).await;
+                                let _ = engine.ack_message(&m.message_uuid7).await;
                             }
                             ModulePayload::MessageInProcess(m) => {
-                                if m.message_uuid7.is_empty() {
-                                    None
-                                } else {
-                                    Some(m.message_uuid7.clone())
-                                }
+                                let _ = engine.echo_in_process(m).await;
+                                let _ = engine.ack_message(&m.message_uuid7).await;
                             }
                             ModulePayload::MessagePostProcess(m) => {
-                                if m.message_uuid7.is_empty() {
-                                    None
-                                } else {
-                                    Some(m.message_uuid7.clone())
-                                }
+                                let _ = engine.echo_post_process(m).await;
+                                let _ = engine.ack_message(&m.message_uuid7).await;
                             }
-                            _ => None,
-                        };
-                        if let Some(u) = ack_uuid {
-                            let _ = engine.ack_message(&u).await;
+                            _ => {}
                         }
 
                         match payload {
