@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use base64::Engine;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::warn;
@@ -198,18 +198,30 @@ fn pkce_pair() -> (String, String) {
 /// Twitch login: browser implicit-grant OAuth. Owner if the operator's user id
 /// is the monitored channel's broadcaster id; mod if the channel appears in the
 /// operator's moderated-channels list; send if the token has chat:edit.
-pub async fn login_twitch(eng: &EngineHandle, channel: &str, cfg: &ChatConfig) -> Result<LoginState, String> {
+pub async fn login_twitch(
+    eng: &EngineHandle,
+    channel: &str,
+    cfg: &ChatConfig,
+) -> Result<LoginState, String> {
     let creds = eng.adapter_credentials("twitch-adapter").await?;
     let client_id = creds.get("client_id").cloned().unwrap_or_default();
     if client_id.is_empty() {
-        return Err("twitch-adapter has no client_id configured — set it via the TUI credential form".to_string());
+        return Err(
+            "twitch-adapter has no client_id configured — set it via the TUI credential form"
+                .to_string(),
+        );
     }
 
     let auth_url = format!(
         "https://id.twitch.tv/oauth2/authorize?client_id={}&redirect_uri={}&response_type=token&scope={}",
         client_id, redirect_uri(cfg.oauth_redirect_port), "user:read+chat:read+chat:edit"
     );
-    let raw = capture_auth_redirect(&auth_url, cfg.oauth_redirect_port, cfg.oauth_listener_attempts).await?;
+    let raw = capture_auth_redirect(
+        &auth_url,
+        cfg.oauth_redirect_port,
+        cfg.oauth_listener_attempts,
+    )
+    .await?;
     let token = raw.trim_start_matches("oauth:").to_string();
 
     let client = reqwest::Client::new();
@@ -224,12 +236,24 @@ pub async fn login_twitch(eng: &EngineHandle, channel: &str, cfg: &ChatConfig) -
         .await
         .map_err(|e| format!("twitch validate parse failed: {}", e))?;
 
-    let login = val.get("login").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let user_id = val.get("user_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let login = val
+        .get("login")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let user_id = val
+        .get("user_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let scopes: Vec<String> = val
         .get("scopes")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| s.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
 
     // Resolve the monitored channel -> broadcaster id.
@@ -332,12 +356,19 @@ async fn kick_channel_resolves_to_token(
 /// truth for identity: it is resolved via the public API self-check, and a
 /// handle the operator typed is only trusted when it resolves to that same
 /// channel.
-pub async fn login_kick(eng: &EngineHandle, fallback_handle: &str, cfg: &ChatConfig) -> Result<LoginState, String> {
+pub async fn login_kick(
+    eng: &EngineHandle,
+    fallback_handle: &str,
+    cfg: &ChatConfig,
+) -> Result<LoginState, String> {
     let creds = eng.adapter_credentials("kick-adapter").await?;
     let client_id = creds.get("client_id").cloned().unwrap_or_default();
     let client_secret = creds.get("client_secret").cloned().unwrap_or_default();
     if client_id.is_empty() || client_secret.is_empty() {
-        return Err("kick-adapter needs client_id + client_secret — set them via the TUI credential form".to_string());
+        return Err(
+            "kick-adapter needs client_id + client_secret — set them via the TUI credential form"
+                .to_string(),
+        );
     }
 
     let (verifier, challenge) = pkce_pair();
@@ -345,7 +376,12 @@ pub async fn login_kick(eng: &EngineHandle, fallback_handle: &str, cfg: &ChatCon
         "https://id.kick.com/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope={}&code_challenge={}&code_challenge_method=S256&state={}",
         client_id, redirect_uri(cfg.oauth_redirect_port), "user:read+chat:write+moderation:ban", challenge, random_string(16)
     );
-    let code = capture_auth_redirect(&auth_url, cfg.oauth_redirect_port, cfg.oauth_listener_attempts).await?;
+    let code = capture_auth_redirect(
+        &auth_url,
+        cfg.oauth_redirect_port,
+        cfg.oauth_listener_attempts,
+    )
+    .await?;
 
     let client = reqwest::Client::new();
     let tok: serde_json::Value = client
@@ -355,7 +391,10 @@ pub async fn login_kick(eng: &EngineHandle, fallback_handle: &str, cfg: &ChatCon
             ("client_id", client_id.as_str()),
             ("client_secret", client_secret.as_str()),
             ("code", code.as_str()),
-            ("redirect_uri", redirect_uri(cfg.oauth_redirect_port).as_str()),
+            (
+                "redirect_uri",
+                redirect_uri(cfg.oauth_redirect_port).as_str(),
+            ),
             ("code_verifier", verifier.as_str()),
         ])
         .timeout(Duration::from_secs(cfg.login_http_timeout_secs as u64))
@@ -402,7 +441,9 @@ pub async fn login_kick(eng: &EngineHandle, fallback_handle: &str, cfg: &ChatCon
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            token_user_id = json.pointer("/data/0/user_id").and_then(json_value_to_string);
+            token_user_id = json
+                .pointer("/data/0/user_id")
+                .and_then(json_value_to_string);
         }
     }
 
@@ -414,9 +455,13 @@ pub async fn login_kick(eng: &EngineHandle, fallback_handle: &str, cfg: &ChatCon
     } else {
         let typed = fallback_handle.trim();
         let matches_self = !token_username.is_empty() && token_username.eq_ignore_ascii_case(typed);
-        let resolves_to_token =
-            kick_channel_resolves_to_token(&client, typed, token_user_id.as_deref(), cfg.login_http_timeout_secs)
-                .await;
+        let resolves_to_token = kick_channel_resolves_to_token(
+            &client,
+            typed,
+            token_user_id.as_deref(),
+            cfg.login_http_timeout_secs,
+        )
+        .await;
         if matches_self || resolves_to_token {
             if token_username.is_empty() {
                 typed.to_string()
@@ -456,7 +501,12 @@ pub async fn login_youtube(eng: &EngineHandle, cfg: &ChatConfig) -> Result<Login
         "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope={}&access_type=offline",
         cfg.google_oauth_client_id, redirect_uri(cfg.oauth_redirect_port), scope
     );
-    let code = capture_auth_redirect(&auth_url, cfg.oauth_redirect_port, cfg.oauth_listener_attempts).await?;
+    let code = capture_auth_redirect(
+        &auth_url,
+        cfg.oauth_redirect_port,
+        cfg.oauth_listener_attempts,
+    )
+    .await?;
 
     let client = reqwest::Client::new();
     let tok: serde_json::Value = client
@@ -465,7 +515,10 @@ pub async fn login_youtube(eng: &EngineHandle, cfg: &ChatConfig) -> Result<Login
             ("code", code.as_str()),
             ("client_id", cfg.google_oauth_client_id.as_str()),
             ("client_secret", cfg.google_oauth_client_secret.as_str()),
-            ("redirect_uri", redirect_uri(cfg.oauth_redirect_port).as_str()),
+            (
+                "redirect_uri",
+                redirect_uri(cfg.oauth_redirect_port).as_str(),
+            ),
             ("grant_type", "authorization_code"),
         ])
         .timeout(Duration::from_secs(cfg.login_http_timeout_secs as u64))
@@ -551,7 +604,9 @@ pub async fn login_and_verify(
             platform
         ));
     }
-    state.effective = eng.verify_identity(&state.platform, &state.handle, &state.verified).await?;
+    state.effective = eng
+        .verify_identity(&state.platform, &state.handle, &state.verified)
+        .await?;
     save_login(&state);
     Ok(state)
 }

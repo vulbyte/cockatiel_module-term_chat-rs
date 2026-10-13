@@ -39,6 +39,54 @@ use login::LoginState;
 use render::Ui;
 use types::{AppStatus, ChatMessageItem, UiMode};
 
+/// Donation fields resolved for a message: `(is_donation, amount, kind)`.
+type DonationFields = (bool, String, String);
+
+/// Shapes the (optional) donation JSON the adapters stash in `ChatMessage.raw_data`.
+#[derive(serde::Deserialize)]
+struct RawDonationEnvelope {
+    donation: Option<RawDonation>,
+}
+
+#[derive(serde::Deserialize)]
+struct RawDonation {
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    display: String,
+}
+
+/// Resolve donation display from the engine's enriched `css_properties` map,
+/// falling back to parsing the raw adapter JSON when the engine added no
+/// `is_donation` key. The css map is authoritative: we only hit `raw_data` when
+/// the flag is absent and the bytes are available.
+fn donation_fields(
+    css: Option<&HashMap<String, String>>,
+    raw_data: Option<&[u8]>,
+) -> DonationFields {
+    let css_has_flag = css.map(|m| m.contains_key("is_donation")).unwrap_or(false);
+    if !css_has_flag {
+        if let Some((kind, amount)) = raw_data.and_then(parse_raw_donation) {
+            return (true, amount, kind);
+        }
+        return (false, String::new(), String::new());
+    }
+
+    let get = |key: &str| css.and_then(|m| m.get(key)).cloned().unwrap_or_default();
+    let is_donation = css
+        .and_then(|m| m.get("is_donation"))
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    (is_donation, get("donation_amount"), get("donation_kind"))
+}
+
+/// Parse `{"donation":{"kind":...,"display":...}}` from raw bytes.
+fn parse_raw_donation(raw: &[u8]) -> Option<(String, String)> {
+    let envelope: RawDonationEnvelope = serde_json::from_slice(raw).ok()?;
+    let donation = envelope.donation?;
+    Some((donation.kind, donation.display))
+}
+
 fn build_message_item(
     payload: &ModulePayload,
     emoji_map: &HashMap<String, String>,
@@ -55,6 +103,7 @@ fn build_message_item(
         score,
         reprimanded,
         role_badges,
+        donation,
         user_handle,
         user_uuid7,
         message_uuid7,
@@ -91,6 +140,10 @@ fn build_message_item(
                 .map(|n| n > 0)
                 .unwrap_or(false);
             let role_badges = user_data.map(role_badges_of).unwrap_or_default();
+            let donation = donation_fields(
+                styling.map(|st| &st.css_properties),
+                raw.map(|cm| cm.raw_data.as_slice()),
+            );
             let content = if !pp.processed_message.is_empty() {
                 pp.processed_message.clone()
             } else {
@@ -106,6 +159,7 @@ fn build_message_item(
                 score,
                 reprimanded,
                 role_badges,
+                donation,
                 raw.map(|cm| cm.user_uuid7.clone()).unwrap_or_default(),
                 raw.map(|cm| cm.user_uuid7.clone()).unwrap_or_default(),
                 pp.message_uuid7.clone(),
@@ -143,6 +197,10 @@ fn build_message_item(
                 .map(|n| n > 0)
                 .unwrap_or(false);
             let role_badges = user_data.map(role_badges_of).unwrap_or_default();
+            let donation = donation_fields(
+                styling.map(|st| &st.css_properties),
+                raw.map(|cm| cm.raw_data.as_slice()),
+            );
             let content = raw.map(|cm| cm.raw_message.clone()).unwrap_or_default();
             (
                 raw.map(|cm| cm.platform.clone()).unwrap_or_default(),
@@ -154,6 +212,7 @@ fn build_message_item(
                 score,
                 reprimanded,
                 role_badges,
+                donation,
                 raw.map(|cm| cm.user_uuid7.clone()).unwrap_or_default(),
                 raw.map(|cm| cm.user_uuid7.clone()).unwrap_or_default(),
                 pre.message_uuid7.clone(),
@@ -193,6 +252,9 @@ fn build_message_item(
         rank_value,
         score,
         role_badges,
+        is_donation: donation.0,
+        donation_amount: donation.1,
+        donation_kind: donation.2,
         reprimanded,
         platform,
         user_handle,

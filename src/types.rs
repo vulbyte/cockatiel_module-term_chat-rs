@@ -14,6 +14,15 @@ pub struct ChatMessageItem {
     /// Displayed beside the name when `show_score` is on.
     pub score: i32,
     pub role_badges: String,
+    /// True when the engine flagged this message as a donation (superchat,
+    /// membership, gift, ...). Drives the donation badge before the content.
+    pub is_donation: bool,
+    /// Human-readable donation amount (e.g. `$5.00`). Empty for donations with
+    /// no money attached (plain memberships/gifts).
+    pub donation_amount: String,
+    /// Donation kind (e.g. `superchat`, `membership`, `gift`), display-cased
+    /// by the renderer.
+    pub donation_kind: String,
     /// True when the user has been reprimanded (reprimands counter > 0);
     /// drives the compact `R` indicator.
     pub reprimanded: bool,

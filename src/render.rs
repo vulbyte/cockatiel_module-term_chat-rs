@@ -11,6 +11,11 @@ use crate::types::{AppStatus, ChatMessageItem, UiMode};
 
 pub const HEADER: &str = " Cockatiel Term Chat ";
 
+const DIM_COLOR: &str = "\x1b[90m";
+const CONTENT_COLOR: &str = "\x1b[37m";
+/// Bold yellow: the donation badge must stand out from name/bracket colors.
+const DONATION_COLOR: &str = "\x1b[1;33m";
+
 /// Interactive UI state that the event loop mutates and the renderer draws.
 pub struct Ui {
     pub mode: UiMode,
@@ -46,10 +51,45 @@ pub struct RenderedLine {
     pub name_color: String,
     pub bracket_content: String,
     pub content: String,
+    /// Plain donation badge (e.g. `[$5.00 SUPERCHAT]`) printed before `content`,
+    /// colored by `content_line`. `None` for non-donation messages.
+    pub donation_tag: Option<String>,
     pub image_art: Option<String>,
     pub image_status: Option<String>,
     /// True when the message is inside the fade-out window (`dim` mode).
     pub dimmed: bool,
+}
+
+/// Build the donation badge text placed before the content, e.g.
+/// `[$5.00 SUPERCHAT]`, or `[MEMBER]` when the donation carries no amount.
+/// Returns `None` for ordinary (non-donation) messages.
+pub(crate) fn donation_tag(msg: &ChatMessageItem) -> Option<String> {
+    if !msg.is_donation {
+        return None;
+    }
+    let kind = msg.donation_kind.trim().to_uppercase();
+    let amount = msg.donation_amount.trim();
+    let tag = match (amount.is_empty(), kind.is_empty()) {
+        (false, false) => format!("[{amount} {kind}]"),
+        (true, false) => format!("[{kind}]"),
+        (false, true) => format!("[{amount}]"),
+        (true, true) => "[DONATION]".to_string(),
+    };
+    Some(tag)
+}
+
+/// The full content line (donation badge + body) as printed by `draw`.
+fn content_line(line: &RenderedLine) -> String {
+    let base = if line.dimmed {
+        DIM_COLOR
+    } else {
+        CONTENT_COLOR
+    };
+    let prefix = match &line.donation_tag {
+        Some(tag) => format!("{DONATION_COLOR}{tag}\x1b[0m "),
+        None => String::new(),
+    };
+    format!("{prefix}{base}{}\x1b[0m", line.content)
 }
 
 /// Build the bracket content (everything inside `[...]`) honoring display toggles.
@@ -116,7 +156,13 @@ fn ceil_div(len: usize, width: usize) -> usize {
 
 pub(crate) fn rows_needed(line: &RenderedLine, cols: usize) -> usize {
     let bracket_rows = ceil_div(line.bracket_content.chars().count(), cols);
-    let content_rows = ceil_div(line.content.chars().count(), cols);
+    let content_chars = line.content.chars().count()
+        + line
+            .donation_tag
+            .as_ref()
+            .map(|t| t.chars().count() + 1)
+            .unwrap_or(0);
+    let content_rows = ceil_div(content_chars, cols);
     let image_rows = line
         .image_art
         .as_ref()
@@ -229,6 +275,7 @@ pub fn draw(
             },
             bracket_content: bracket_content(msg, config),
             content: msg.content.clone(),
+            donation_tag: donation_tag(msg),
             image_art,
             image_status: msg.image_status.clone(),
             dimmed,
@@ -319,11 +366,7 @@ pub fn draw(
             }
         }
 
-        print!(
-            "{}{}\x1b[0m\r\n\r\n",
-            if line.dimmed { dim_color } else { "\x1b[37m" },
-            line.content
-        );
+        print!("{}\r\n\r\n", content_line(line));
     }
 
     // 3. Status bar
@@ -517,6 +560,9 @@ mod bracket_tests {
             rank_value: 0.0,
             score: 0,
             role_badges: badges.into(),
+            is_donation: false,
+            donation_amount: String::new(),
+            donation_kind: String::new(),
             reprimanded,
             platform: "tw".into(),
             user_handle: String::new(),
@@ -655,5 +701,50 @@ mod bracket_tests {
             current_frame(&frames, &delays, std::time::Duration::from_millis(250)),
             "a"
         );
+    }
+
+    fn rendered(msg: &ChatMessageItem) -> RenderedLine {
+        let cfg = ChatConfig::default();
+        RenderedLine {
+            username: msg.username.clone(),
+            name_color: String::new(),
+            bracket_content: bracket_content(msg, &cfg),
+            content: msg.content.clone(),
+            donation_tag: donation_tag(msg),
+            image_art: None,
+            image_status: None,
+            dimmed: false,
+        }
+    }
+
+    #[test]
+    fn donation_badge_renders_amount_and_kind() {
+        let mut msg = item("bob", "", "", false);
+        msg.is_donation = true;
+        msg.donation_amount = "$5.00".into();
+        msg.donation_kind = "superchat".into();
+
+        let line = rendered(&msg);
+        let out = content_line(&line);
+        assert!(out.contains("$5.00"), "amount must render: {out}");
+        assert!(out.contains("SUPERCHAT"), "kind must render: {out}");
+        assert!(out.contains(DONATION_COLOR), "badge is colored: {out}");
+
+        // A normal message renders no donation badge.
+        let normal = rendered(&item("bob", "", "", false));
+        let normal_out = content_line(&normal);
+        assert!(normal.donation_tag.is_none());
+        assert!(!normal_out.contains("SUPERCHAT"));
+        assert!(!normal_out.contains(DONATION_COLOR));
+    }
+
+    #[test]
+    fn donation_badge_omits_amount_when_empty() {
+        let mut msg = item("bob", "", "", false);
+        msg.is_donation = true;
+        msg.donation_kind = "membership".into();
+        let tag = donation_tag(&msg).expect("membership has a badge");
+        assert_eq!(tag, "[MEMBERSHIP]");
+        assert!(!tag.contains("  "), "no dangling separator: {tag}");
     }
 }

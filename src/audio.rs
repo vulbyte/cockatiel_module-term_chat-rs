@@ -41,8 +41,12 @@ impl AudioPlayer {
         };
 
         std::thread::spawn(move || {
-            let Ok((_stream, handle)) = OutputStream::try_default() else { return };
-            let Ok(sink) = Sink::try_new(&handle) else { return };
+            let Ok((_stream, handle)) = OutputStream::try_default() else {
+                return;
+            };
+            let Ok(sink) = Sink::try_new(&handle) else {
+                return;
+            };
             while let Some(job) = rx.blocking_recv() {
                 let bytes = match &job {
                     PlayJob::Inline { bytes } => bytes.clone(),
@@ -50,7 +54,9 @@ impl AudioPlayer {
                 if bytes.is_empty() {
                     continue;
                 }
-                let Ok(decoder) = Decoder::new(Cursor::new(bytes)) else { continue };
+                let Ok(decoder) = Decoder::new(Cursor::new(bytes)) else {
+                    continue;
+                };
                 // Known-length clips over the cap are skipped.
                 if let Some(d) = decoder.total_duration() {
                     if d.as_secs_f64() > max_seconds as f64 {
@@ -89,9 +95,7 @@ impl AudioPlayer {
         if !self.claim(uuid7) {
             return;
         }
-        let _ = self.tx.send(PlayJob::Inline {
-            bytes,
-        });
+        let _ = self.tx.send(PlayJob::Inline { bytes });
     }
 
     /// Record a uuid as queued/played, returning false if it already was.

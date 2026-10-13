@@ -617,6 +617,7 @@ mod tests {
                 name_color: String::new(),
                 bracket_content: "u".to_string(),
                 content: "hello".to_string(),
+                donation_tag: None,
                 image_art: Some(art),
                 image_status: None,
                 dimmed: false,

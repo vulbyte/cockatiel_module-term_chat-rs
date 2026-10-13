@@ -66,7 +66,8 @@ pub fn fade_action(
             }
         }
         FadeMode::Dim => {
-            let dim_start = total.saturating_sub(fade_window(fade_secs, dim_fraction, dim_max_secs));
+            let dim_start =
+                total.saturating_sub(fade_window(fade_secs, dim_fraction, dim_max_secs));
             if age >= total {
                 FadeAction::Remove
             } else if age >= dim_start {
