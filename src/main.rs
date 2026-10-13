@@ -20,7 +20,7 @@ use crossterm::{
 };
 use regex::Regex;
 use tokio::sync::{mpsc, Mutex, RwLock};
-use tracing::{warn, Level};
+use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use cockatiel_client::proto::container_for_engine::Payload as EnginePayload;
@@ -550,6 +550,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ModulePayload::MessagePostProcess(m) => {
                                 let _ = engine.echo_post_process(m).await;
                                 let _ = engine.ack_message(&m.message_uuid7).await;
+                            }
+                            ModulePayload::Shutdown(_) => {
+                                info!("Engine requested shutdown — exiting");
+                                let _ = terminal::disable_raw_mode();
+                                let _ = std::io::stdout().execute(terminal::LeaveAlternateScreen);
+                                std::process::exit(0);
                             }
                             _ => {}
                         }
