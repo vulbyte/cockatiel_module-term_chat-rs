@@ -57,6 +57,17 @@ pub struct ChatConfig {
     /// Playback volume (0.0–1.0).
     #[serde(default = "default_audio_volume")]
     pub audio_volume: f32,
+    /// Name of the audio output device TTS clips play through. Empty = the
+    /// system-default output. On macOS audio is attributed to the process/
+    /// device, not the window, so to capture term-chat in OBS without whole-
+    /// desktop capture set this to a virtual device (e.g. `"BlackHole 2ch"`)
+    /// that OBS adds as an Audio Input. To keep the audio audible at the same
+    /// time, create a Multi-Output Device in Audio MIDI Setup containing both
+    /// your speakers and BlackHole, then point this at that device. If the
+    /// named device is absent or fails to open, playback falls back to the
+    /// system default.
+    #[serde(default = "default_audio_output_device")]
+    pub audio_output_device: String,
     // Message fade (roadmap: "disappear after x seconds")
     /// Seconds a message stays on screen before being faded out. `0` = never
     /// fade (default).
@@ -160,6 +171,10 @@ fn default_max_audio_seconds() -> f32 {
 
 fn default_audio_volume() -> f32 {
     0.4
+}
+
+fn default_audio_output_device() -> String {
+    String::new()
 }
 
 fn default_message_fade_mode() -> String {
@@ -276,6 +291,7 @@ impl Default for ChatConfig {
             play_audio: true,
             max_audio_seconds: 15.0,
             audio_volume: 0.4,
+            audio_output_device: String::new(),
             message_fade_secs: 0,
             message_fade_mode: "remove".to_string(),
             show_reprimand: true,
@@ -337,6 +353,7 @@ impl ChatConfig {
                             "show_score_color": true,
                             "audio_fetch_retries": 3,
                             "audio_fetch_retry_delay_ms": 800,
+                            "audio_output_device": "",
                             "image_show_errors": false,
                             "image_max_bytes": 10 * 1024 * 1024,
                             "image_max_concurrent": 8,

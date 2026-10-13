@@ -2228,6 +2228,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "cockatiel-client",
+ "cpal",
  "crossterm",
  "futures-util",
  "image",

@@ -418,7 +418,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(images::load_map(&config.image_map_path));
     let image_regexes: Arc<HashMap<String, Regex>> =
         Arc::new(images::compile_map_regexes(image_map.as_ref()));
-    let audio_player = audio::AudioPlayer::start(config.audio_volume, config.max_audio_seconds);
+    let audio_player = audio::AudioPlayer::start(
+        config.audio_volume,
+        config.max_audio_seconds,
+        &config.audio_output_device,
+    );
 
     // Read task: engine -> UI, with automatic reconnect (exponential backoff).
     {

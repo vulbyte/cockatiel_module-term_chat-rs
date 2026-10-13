@@ -1,8 +1,10 @@
-use rodio::{Decoder, OutputStream, Sink, Source};
+use cpal::traits::{DeviceTrait, HostTrait};
+use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
 use std::collections::HashSet;
 use std::io::Cursor;
 use std::sync::Arc;
 use std::time::Duration;
+use tracing::warn;
 
 /// One unit of audio to speak, in FIFO order.
 enum PlayJob {
@@ -28,20 +30,22 @@ pub struct AudioPlayer {
 }
 
 impl AudioPlayer {
-    /// Start the player. `volume` and `max_seconds` bound playback.
+    /// Start the player. `volume` and `max_seconds` bound playback;
+    /// `output_device` names the audio output to use (empty = system default).
     ///
     /// The worker runs on a dedicated OS thread (not a tokio task): rodio's
     /// `OutputStream`/`Sink` are not `Send`, so they can't cross an `.await`.
-    pub fn start(volume: f32, max_seconds: f32) -> Self {
+    pub fn start(volume: f32, max_seconds: f32, output_device: &str) -> Self {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let queued = Arc::new(std::sync::Mutex::new(HashSet::new()));
         let player = AudioPlayer {
             tx,
             queued: queued.clone(),
         };
+        let output_device = output_device.to_string();
 
         std::thread::spawn(move || {
-            let Ok((_stream, handle)) = OutputStream::try_default() else {
+            let Some((_stream, handle)) = open_output(&output_device) else {
                 return;
             };
             let Ok(sink) = Sink::try_new(&handle) else {
@@ -109,6 +113,59 @@ impl AudioPlayer {
         }
     }
 }
+
+/// Open an output stream: the named device when one is configured, otherwise
+/// (or if the named device is missing/fails) the system default.
+///
+/// Keeping the resolved stream paired with its handle lets the caller hold the
+/// stream alive for the worker's whole life.
+fn open_output(device_name: &str) -> Option<(OutputStream, OutputStreamHandle)> {
+    if !device_name.is_empty() {
+        match find_output_device(device_name) {
+            Some(device) => match OutputStream::try_from_device(&device) {
+                Ok(pair) => return Some(pair),
+                Err(e) => warn!(
+                    "failed to open audio output device '{}': {}; falling back to system default",
+                    device_name, e
+                ),
+            },
+            None => warn!(
+                "audio output device '{}' not found; falling back to system default",
+                device_name
+            ),
+        }
+    }
+    match OutputStream::try_default() {
+        Ok(pair) => Some(pair),
+        Err(e) => {
+            warn!("failed to open system default audio output: {}", e);
+            None
+        }
+    }
+}
+
+/// Look up an output device whose name exactly equals `name`.
+fn find_output_device(name: &str) -> Option<cpal::Device> {
+    let host = cpal::default_host();
+    let named: Vec<(String, cpal::Device)> = host
+        .output_devices()
+        .ok()?
+        .filter_map(|d| d.name().ok().map(|n| (n, d)))
+        .collect();
+    find_by_name(&named, name)
+}
+
+/// Pick the first `(name, value)` whose name exactly equals `want`.
+///
+/// Pure so the matching policy is unit-testable without real audio hardware.
+/// `None` means the caller falls back to the system-default device.
+fn find_by_name<T: Clone>(items: &[(String, T)], want: &str) -> Option<T> {
+    items
+        .iter()
+        .find(|(n, _)| n == want)
+        .map(|(_, v)| v.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,5 +184,19 @@ mod tests {
         assert!(!player.claim("a"), "repeat claim rejected");
         assert!(player.claim("b"), "a different uuid is accepted");
         assert!(!player.claim("b"), "its repeat is rejected");
+    }
+
+    /// Device matching is an exact name lookup: a hit returns the value, a
+    /// miss (or an empty list) returns `None` so `open_output` falls back to
+    /// the system default.
+    #[test]
+    fn find_by_name_matches_exactly_or_falls_back() {
+        let devices = vec![
+            ("MacBook Speakers".to_string(), 1u32),
+            ("BlackHole 2ch".to_string(), 2u32),
+        ];
+        assert_eq!(find_by_name(&devices, "BlackHole 2ch"), Some(2));
+        assert_eq!(find_by_name(&devices, "Missing"), None);
+        assert_eq!(find_by_name::<u32>(&[], "BlackHole 2ch"), None);
     }
 }

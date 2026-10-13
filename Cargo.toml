@@ -22,4 +22,5 @@ open = "5.0"
 sha2 = "0.10"
 base64 = "0.21"
 rodio = { version = "0.19", features = ["mp3", "wav"] }
+cpal = "0.15"
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
