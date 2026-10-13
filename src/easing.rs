@@ -96,6 +96,7 @@ mod tests {
             rank: String::new(),
             rank_value: 0.0,
             score: 0,
+            multiplier: 1.0,
             role_badges: String::new(),
             is_donation: false,
             donation_amount: String::new(),

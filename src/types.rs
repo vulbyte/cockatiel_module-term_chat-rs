@@ -13,6 +13,10 @@ pub struct ChatMessageItem {
     /// The user's score (points), from the engine's `score` css property.
     /// Displayed beside the name when `show_score` is on.
     pub score: i32,
+    /// The user's current points multiplier for this stream, from the engine's
+    /// `multiplier` css property (combined f32, 1.0 baseline up to 4.0).
+    /// Rendered as `x1.4` ahead of the score only when greater than 1.0.
+    pub multiplier: f32,
     pub role_badges: String,
     /// True when the engine flagged this message as a donation (superchat,
     /// membership, gift, ...). Drives the donation badge before the content.

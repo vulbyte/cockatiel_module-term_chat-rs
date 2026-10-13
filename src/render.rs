@@ -100,6 +100,16 @@ fn bracket_content(msg: &ChatMessageItem, config: &ChatConfig) -> String {
     if config.show_username && !msg.username.is_empty() {
         user_bit = msg.username.clone();
     }
+    // Active points multiplier (`x1.4`) ahead of the score, only when it is
+    // above the 1.0 baseline. Shares the score's color so the pair reads as one.
+    if config.show_score && msg.multiplier > 1.0 && !user_bit.is_empty() {
+        let mult_txt = format!(" x{:.1}", msg.multiplier);
+        if config.show_score_color {
+            user_bit.push_str(&format!("\x1b[36m{}\x1b[0m", mult_txt));
+        } else {
+            user_bit.push_str(&mult_txt);
+        }
+    }
     // Score (points) beside the name, so viewers can see how many they have.
     // `42p` reads as "42 points" and cannot be mistaken for the `(rank)` text.
     if config.show_score && !user_bit.is_empty() {
@@ -559,6 +569,7 @@ mod bracket_tests {
             rank: rank.into(),
             rank_value: 0.0,
             score: 0,
+            multiplier: 1.0,
             role_badges: badges.into(),
             is_donation: false,
             donation_amount: String::new(),
@@ -659,6 +670,34 @@ mod bracket_tests {
         cfg.show_score = false;
         let b = bracket_content(&msg, &cfg);
         assert!(!b.contains("42p"), "score hidden when toggled off: {b}");
+    }
+
+    #[test]
+    fn multiplier_shown_before_score_only_when_above_one() {
+        let mut msg = item("bob", "", "", false);
+        msg.score = 42;
+
+        let mut cfg = ChatConfig::default();
+        cfg.show_score = true;
+        cfg.show_score_color = true;
+
+        msg.multiplier = 1.4;
+        let b = bracket_content(&msg, &cfg);
+        assert!(b.contains("x1.4"), "multiplier must render: {b}");
+        assert!(
+            b.find("x1.4").unwrap() < b.find("42p").unwrap(),
+            "multiplier must come before the score: {b}"
+        );
+        assert!(
+            b.contains("\x1b[36m"),
+            "multiplier shares the score color: {b}"
+        );
+
+        // At the 1.0 baseline nothing is shown.
+        msg.multiplier = 1.0;
+        let b = bracket_content(&msg, &cfg);
+        assert!(!b.contains('x'), "no multiplier at baseline: {b}");
+        assert!(b.contains("42p"), "score still renders: {b}");
     }
 
     #[test]

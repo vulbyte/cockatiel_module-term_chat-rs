@@ -101,6 +101,7 @@ fn build_message_item(
         rank,
         rank_value,
         score,
+        multiplier,
         reprimanded,
         role_badges,
         donation,
@@ -134,6 +135,10 @@ fn build_message_item(
                 .and_then(|st| st.css_properties.get("score"))
                 .and_then(|s| s.parse::<i32>().ok())
                 .unwrap_or(0);
+            let multiplier = styling
+                .and_then(|st| st.css_properties.get("multiplier"))
+                .and_then(|s| s.parse::<f32>().ok())
+                .unwrap_or(1.0);
             let reprimanded = styling
                 .and_then(|st| st.css_properties.get("reprimands"))
                 .and_then(|s| s.parse::<i32>().ok())
@@ -157,6 +162,7 @@ fn build_message_item(
                 rank,
                 rank_value,
                 score,
+                multiplier,
                 reprimanded,
                 role_badges,
                 donation,
@@ -191,6 +197,10 @@ fn build_message_item(
                 .and_then(|st| st.css_properties.get("score"))
                 .and_then(|s| s.parse::<i32>().ok())
                 .unwrap_or(0);
+            let multiplier = styling
+                .and_then(|st| st.css_properties.get("multiplier"))
+                .and_then(|s| s.parse::<f32>().ok())
+                .unwrap_or(1.0);
             let reprimanded = styling
                 .and_then(|st| st.css_properties.get("reprimands"))
                 .and_then(|s| s.parse::<i32>().ok())
@@ -210,6 +220,7 @@ fn build_message_item(
                 rank,
                 rank_value,
                 score,
+                multiplier,
                 reprimanded,
                 role_badges,
                 donation,
@@ -229,8 +240,8 @@ fn build_message_item(
     };
 
     eprintln!(
-        "[dbg-tc] stage={} user={:?} rank={:?} rank_value={} score={}",
-        stage, username, rank, rank_value, score
+        "[dbg-tc] stage={} user={:?} rank={:?} rank_value={} score={} multiplier={}",
+        stage, username, rank, rank_value, score, multiplier
     );
 
     // Key the item by the engine's message uuid7 so an engine re-delivery
@@ -251,6 +262,7 @@ fn build_message_item(
         rank,
         rank_value,
         score,
+        multiplier,
         role_badges,
         is_donation: donation.0,
         donation_amount: donation.1,
