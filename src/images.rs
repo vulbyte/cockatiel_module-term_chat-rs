@@ -110,6 +110,14 @@ pub enum RenderResult {
     Reason(String),
 }
 
+/// Outcome of the video→GIF flow.
+enum VideoOutcome {
+    /// Terminal: converted frames/static art, or an explicit limit rejection.
+    Done(RenderResult),
+    /// Download/converter/ffprobe failed — caller falls back to legacy behavior.
+    Fallback,
+}
+
 /// True when a response `Content-Type` may carry an image. Some CDNs serve
 /// images as a generic `application/octet-stream` / `binary/*`, and a few omit
 /// the header entirely; accept those and sniff the bytes during decode.
@@ -199,6 +207,52 @@ fn converter_available(path: &str) -> bool {
     false
 }
 
+/// True when `url`'s path ends in a video extension we can hand to ffmpeg.
+fn has_video_extension(url: &str) -> bool {
+    let p = url_path_lower(url);
+    p.ends_with(".mp4") || p.ends_with(".webm")
+}
+
+/// Derive the `ffprobe` path from the configured `ffmpeg` path so an explicit
+/// converter path with `ffprobe` beside it works; a path without `ffmpeg`
+/// falls back to the bare name (resolved via `PATH`).
+fn ffprobe_for(ffmpeg_path: &str) -> String {
+    match ffmpeg_path.rfind("ffmpeg") {
+        Some(i) => format!(
+            "{}ffprobe{}",
+            &ffmpeg_path[..i],
+            &ffmpeg_path[i + "ffmpeg".len()..]
+        ),
+        None => "ffprobe".to_string(),
+    }
+}
+
+/// True iff a video of `bytes_len` bytes and `duration_secs` seconds fits
+/// within both maximums. Inclusive: exactly at a maximum still passes.
+fn video_within_limits(
+    bytes_len: usize,
+    duration_secs: u32,
+    max_bytes: usize,
+    max_secs: u32,
+) -> bool {
+    bytes_len <= max_bytes && duration_secs <= max_secs
+}
+
+/// Parse `ffprobe -show_entries format=duration` stdout (a bare seconds value
+/// such as `12.345000`) into whole seconds. Empty, `N/A`, non-numeric,
+/// negative or non-finite input yields `None`.
+fn parse_ffprobe_duration(output: &str) -> Option<u32> {
+    let t = output.trim();
+    if t.is_empty() || t.eq_ignore_ascii_case("N/A") {
+        return None;
+    }
+    let secs = t.parse::<f64>().ok()?;
+    if !secs.is_finite() || secs < 0.0 {
+        return None;
+    }
+    Some(secs.round() as u32)
+}
+
 /// Bounded LRU-ish cache of rendered art, keyed by `url|colsxrows`.
 /// Capped at ~4× the visible chat height so memory stays bounded on a long
 /// stream (oldest entries evicted first).
@@ -229,6 +283,13 @@ pub struct ImageRenderer {
     cache_min: usize,
     /// Fraction of the terminal an embedded image may occupy.
     fit_fraction: f32,
+    /// External video→GIF converter (`ffmpeg`) path/name. Empty disables the
+    /// video-conversion flow (klipy/tenor videos then use their `.gif` sibling).
+    video_converter_path: String,
+    /// Hard cap on a single downloaded video's bytes.
+    video_max_bytes: usize,
+    /// Hard cap on a converted video's duration (seconds).
+    video_max_seconds: u32,
 }
 
 impl ImageRenderer {
@@ -243,6 +304,9 @@ impl ImageRenderer {
         cache_multiplier: usize,
         cache_min: usize,
         fit_fraction: f32,
+        video_converter_path: String,
+        video_max_bytes: usize,
+        video_max_seconds: u32,
     ) -> Self {
         Self {
             converter_path,
@@ -255,6 +319,9 @@ impl ImageRenderer {
             cache_multiplier,
             cache_min,
             fit_fraction,
+            video_converter_path,
+            video_max_bytes,
+            video_max_seconds,
         }
     }
 
@@ -286,6 +353,19 @@ impl ImageRenderer {
     }
 
     async fn render_uncached(&self, url: &str, cols: u16, rows: u16) -> RenderResult {
+        let video_converter = converter_available(&self.video_converter_path);
+
+        // A video URL (klipy/tenor `.mp4`/`.webm`, or any `.mp4`/`.webm`):
+        // when an ffmpeg converter is installed, download + convert it to a
+        // GIF and render that. Limit rejections ("video too large"/"video too
+        // long") are terminal; converter/ffprobe failures fall through to the
+        // legacy `.gif` sibling behavior below.
+        if video_converter && has_video_extension(url) {
+            if let VideoOutcome::Done(result) = self.render_video(url, cols, rows).await {
+                return result;
+            }
+        }
+
         // Klipy/Tenor serve GIFs as `.mp4`/`.webm` which the `image` crate
         // cannot decode: try the sibling `.gif` first, decode direct image
         // URLs, and skip extension-less share URLs (needs their API).
@@ -336,8 +416,9 @@ impl ImageRenderer {
             ));
         }
 
-        // Not an image → nothing to embed. Video (klipy/tenor `.mp4`/`.webm`
-        // that had no decodable `.gif` sibling) is explicitly unsupported.
+        // Not an image → nothing to embed. A `video/*` response is converted
+        // when a converter is installed (the extension-based check above only
+        // catches `.mp4`/`.webm` paths; this covers extension-less video URLs).
         let ctype = resp
             .headers()
             .get("content-type")
@@ -345,6 +426,12 @@ impl ImageRenderer {
             .unwrap_or_default()
             .to_ascii_lowercase();
         if ctype.starts_with("video/") {
+            if video_converter {
+                drop(permit); // release before the self-contained video download
+                if let VideoOutcome::Done(result) = self.render_video(url, cols, rows).await {
+                    return result;
+                }
+            }
             return RenderResult::Reason("video gif not supported".to_string());
         }
         if !content_type_is_image(&ctype) {
@@ -377,9 +464,14 @@ impl ImageRenderer {
             return RenderResult::Reason("image too large".to_string());
         }
         drop(permit); // download done — release before decode/convert
+        self.render_image_bytes(&bytes, cols, rows).await
+    }
 
+    /// Decode already-downloaded image/GIF bytes and render them: animated
+    /// frames when possible, otherwise the external/built-in static path.
+    async fn render_image_bytes(&self, bytes: &[u8], cols: u16, rows: u16) -> RenderResult {
         // Decode to get the source dimensions (needed to preserve aspect).
-        let img = match image::ImageReader::new(Cursor::new(&bytes))
+        let img = match image::ImageReader::new(Cursor::new(bytes))
             .with_guessed_format()
             .map_err(|e| e.to_string())
             .and_then(|r| r.decode().map_err(|e| e.to_string()))
@@ -397,7 +489,7 @@ impl ImageRenderer {
         // Animated GIF/APNG: extract every frame and animate inside this
         // module (never shell out for animation). A single-frame file falls
         // through to the static path below.
-        if let Some(anim) = extract_frames(&bytes, out_w, out_h) {
+        if let Some(anim) = extract_frames(bytes, out_w, out_h) {
             return anim;
         }
 
@@ -405,10 +497,158 @@ impl ImageRenderer {
         // output); otherwise use the built-in renderer so the feature works
         // with no external dependency.
         if converter_available(&self.converter_path) {
-            self.convert_external(&bytes, out_w, out_h).await
+            self.convert_external(bytes, out_w, out_h).await
         } else {
             self.convert_builtin(&img, out_w, out_h)
         }
+    }
+
+    /// Download a video URL (bounded by the image semaphore/timeout, capped at
+    /// `video_max_bytes`), probe its duration, and convert it to a GIF which is
+    /// then rendered through the normal image path. Returns `Fallback` on any
+    /// download/converter/ffprobe failure so the caller can try the legacy
+    /// `.gif` sibling; explicit size/duration limit rejections are terminal.
+    async fn render_video(&self, url: &str, cols: u16, rows: u16) -> VideoOutcome {
+        let permit = match self.download_semaphore.acquire().await {
+            Ok(p) => p,
+            Err(_) => return VideoOutcome::Fallback,
+        };
+
+        let client = reqwest::Client::builder()
+            .user_agent(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+            )
+            .build()
+            .unwrap_or_default();
+        let mut req = client.get(url);
+        if !self.referer.is_empty() {
+            req = req.header("Referer", self.referer.as_str());
+        }
+        let resp = match req.timeout(self.timeout).send().await {
+            Ok(r) => r,
+            Err(_) => return VideoOutcome::Fallback,
+        };
+        if !resp.status().is_success() {
+            return VideoOutcome::Fallback;
+        }
+
+        // Reject oversized videos by Content-Length before downloading.
+        if let Some(cl) = resp
+            .headers()
+            .get(reqwest::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<usize>().ok())
+        {
+            if cl > self.video_max_bytes {
+                return VideoOutcome::Done(RenderResult::Reason("video too large".to_string()));
+            }
+        }
+
+        let bytes = match resp.bytes().await {
+            Ok(b) => b,
+            Err(_) => return VideoOutcome::Fallback,
+        };
+        drop(permit); // download done — release before ffprobe/ffmpeg
+        if bytes.is_empty() {
+            return VideoOutcome::Fallback;
+        }
+        if bytes.len() > self.video_max_bytes {
+            return VideoOutcome::Done(RenderResult::Reason("video too large".to_string()));
+        }
+
+        let mut input = match tempfile::NamedTempFile::new() {
+            Ok(t) => t,
+            Err(_) => return VideoOutcome::Fallback,
+        };
+        if input.write_all(&bytes).is_err() {
+            return VideoOutcome::Fallback;
+        }
+
+        let duration = match self.probe_duration(input.path()).await {
+            Some(d) => d,
+            None => return VideoOutcome::Fallback,
+        };
+        if !video_within_limits(
+            bytes.len(),
+            duration,
+            self.video_max_bytes,
+            self.video_max_seconds,
+        ) {
+            return VideoOutcome::Done(RenderResult::Reason("video too long".to_string()));
+        }
+
+        let gif = match self
+            .convert_to_gif(input.path(), self.video_max_seconds)
+            .await
+        {
+            Some(g) => g,
+            None => return VideoOutcome::Fallback,
+        };
+        drop(input); // NamedTempFile deletes on drop.
+
+        VideoOutcome::Done(self.render_image_bytes(&gif, cols, rows).await)
+    }
+
+    /// Probe a media file's duration (whole seconds) via `ffprobe`. `None` when
+    /// ffprobe is unavailable, fails, or reports no usable duration.
+    async fn probe_duration(&self, path: &std::path::Path) -> Option<u32> {
+        let ffprobe = ffprobe_for(&self.video_converter_path);
+        if !converter_available(&ffprobe) {
+            return None;
+        }
+        let output = tokio::process::Command::new(&ffprobe)
+            .arg("-v")
+            .arg("error")
+            .arg("-show_entries")
+            .arg("format=duration")
+            .arg("-of")
+            .arg("default=nw=1:nk=1")
+            .arg(path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .await
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        parse_ffprobe_duration(&String::from_utf8_lossy(&output.stdout))
+    }
+
+    /// Convert a media file to a GIF with ffmpeg (palette-optimised, 15 fps,
+    /// 480 px wide, bounded to `max_secs`). Returns the GIF bytes, or `None`
+    /// on any failure.
+    async fn convert_to_gif(&self, input: &std::path::Path, max_secs: u32) -> Option<Vec<u8>> {
+        let out = tempfile::Builder::new().suffix(".gif").tempfile().ok()?;
+        let out_path = out.path().to_path_buf();
+        let filter =
+            "fps=15,scale=480:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse";
+        let status = tokio::process::Command::new(&self.video_converter_path)
+            .arg("-y")
+            .arg("-i")
+            .arg(input)
+            .arg("-t")
+            .arg(max_secs.to_string())
+            .arg("-vf")
+            .arg(filter)
+            .arg("-loop")
+            .arg("0")
+            .arg(&out_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .status()
+            .await
+            .ok()?;
+        if !status.success() {
+            return None;
+        }
+        let bytes = std::fs::read(&out_path).ok()?;
+        drop(out); // NamedTempFile deletes on drop.
+        if bytes.is_empty() {
+            return None;
+        }
+        Some(bytes)
     }
 
     /// Run the external `ascii-image-converter` on the downloaded bytes.
@@ -686,6 +926,9 @@ mod tests {
             4,
             8,
             0.8,
+            "ffmpeg".to_string(),
+            10 * 1024 * 1024,
+            30,
         );
         // Construct keys the same way `render` does.
         let k1 = format!("{}|{}x{}", "http://x/i.png", 120u16, 30u16);
@@ -750,6 +993,109 @@ mod tests {
         ));
         #[cfg(unix)]
         assert!(converter_available("sh"), "sh should be found on PATH");
+    }
+
+    #[test]
+    fn video_within_limits_boundaries() {
+        // Exactly at both maximums passes.
+        assert!(video_within_limits(100, 30, 100, 30));
+        // Over either maximum fails.
+        assert!(!video_within_limits(101, 30, 100, 30));
+        assert!(!video_within_limits(100, 31, 100, 30));
+        assert!(!video_within_limits(101, 31, 100, 30));
+        // Zero-length / zero-duration is within limits.
+        assert!(video_within_limits(0, 0, 100, 30));
+    }
+
+    #[test]
+    fn parse_ffprobe_duration_handles_values() {
+        assert_eq!(parse_ffprobe_duration("12.345000\n"), Some(12));
+        assert_eq!(parse_ffprobe_duration("12.5"), Some(13));
+        assert_eq!(parse_ffprobe_duration("0"), Some(0));
+        assert_eq!(parse_ffprobe_duration("30.000000"), Some(30));
+        // Missing / invalid → None.
+        assert_eq!(parse_ffprobe_duration(""), None);
+        assert_eq!(parse_ffprobe_duration("   "), None);
+        assert_eq!(parse_ffprobe_duration("N/A"), None);
+        assert_eq!(parse_ffprobe_duration("garbage"), None);
+        assert_eq!(parse_ffprobe_duration("-1.0"), None);
+        assert_eq!(parse_ffprobe_duration("inf"), None);
+    }
+
+    #[test]
+    fn has_video_extension_detects_mp4_and_webm() {
+        assert!(has_video_extension("https://static.klipy.com/a/x.mp4"));
+        assert!(has_video_extension("https://media.tenor.com/a/x.webm?t=1"));
+        assert!(has_video_extension("https://x/a.MP4"));
+        assert!(!has_video_extension("https://x/a.gif"));
+        assert!(!has_video_extension("https://x/a.mp4.gif"));
+        assert!(!has_video_extension("https://tenor.com/view/x"));
+    }
+
+    #[test]
+    fn ffprobe_for_derives_sibling_path() {
+        assert_eq!(ffprobe_for("ffmpeg"), "ffprobe");
+        assert_eq!(
+            ffprobe_for("/usr/local/bin/ffmpeg"),
+            "/usr/local/bin/ffprobe"
+        );
+        assert_eq!(
+            ffprobe_for("/opt/ffmpeg/bin/ffmpeg"),
+            "/opt/ffmpeg/bin/ffprobe"
+        );
+        assert_eq!(ffprobe_for("myconverter"), "ffprobe");
+    }
+
+    #[test]
+    fn ffmpeg_probe_and_convert_round_trip() {
+        // Only runs where ffmpeg + ffprobe are installed; CI without them stays
+        // green. Any setup failure also skips rather than fails.
+        if !converter_available("ffmpeg") || !converter_available(&ffprobe_for("ffmpeg")) {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.mp4");
+        let gen = std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=duration=1:size=64x64:rate=10",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&src)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if !matches!(gen, Ok(s) if s.success()) {
+            return;
+        }
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let renderer = ImageRenderer::new(
+            String::new(),
+            60,
+            String::new(),
+            10 * 1024 * 1024,
+            8,
+            15,
+            4,
+            8,
+            0.8,
+            "ffmpeg".to_string(),
+            10 * 1024 * 1024,
+            30,
+        );
+        let duration = rt.block_on(renderer.probe_duration(&src));
+        assert!(matches!(duration, Some(d) if d <= 1));
+        let gif = rt.block_on(renderer.convert_to_gif(&src, 30));
+        let gif = gif.expect("ffmpeg should produce gif bytes");
+        assert_eq!(&gif[..3], b"GIF");
     }
 
     #[test]

@@ -122,6 +122,20 @@ pub struct ChatConfig {
     /// Fraction of the terminal an embedded image may occupy.
     #[serde(default = "default_image_fit_fraction")]
     pub image_fit_fraction: f32,
+    /// External video→GIF converter (`ffmpeg`). A bare name resolves via
+    /// `PATH`; an explicit path is checked directly; an empty value disables
+    /// video conversion (klipy/tenor video URLs then fall back to their
+    /// `.gif` sibling).
+    #[serde(default = "default_video_converter_path")]
+    pub video_converter_path: String,
+    /// Hard cap on a single downloaded video's bytes; an oversized video is
+    /// rejected with `video too large`.
+    #[serde(default = "default_video_max_bytes")]
+    pub video_max_bytes: usize,
+    /// Hard cap on a converted video's duration in seconds; a longer video is
+    /// rejected with `video too long`.
+    #[serde(default = "default_video_max_seconds")]
+    pub video_max_seconds: u32,
     /// Fraction of a message's lifetime used for the dim fade-out window.
     #[serde(default = "default_fade_dim_fraction")]
     pub fade_dim_fraction: f32,
@@ -221,6 +235,18 @@ fn default_image_fit_fraction() -> f32 {
     0.7
 }
 
+fn default_video_converter_path() -> String {
+    "ffmpeg".to_string()
+}
+
+fn default_video_max_bytes() -> usize {
+    10 * 1024 * 1024
+}
+
+fn default_video_max_seconds() -> u32 {
+    30
+}
+
 fn default_fade_dim_fraction() -> f32 {
     0.2
 }
@@ -308,6 +334,9 @@ impl Default for ChatConfig {
             image_cache_multiplier: 4,
             image_cache_min: 8,
             image_fit_fraction: 0.7,
+            video_converter_path: "ffmpeg".to_string(),
+            video_max_bytes: 10 * 1024 * 1024,
+            video_max_seconds: 30,
             fade_dim_fraction: 0.2,
             fade_dim_max_secs: 2,
             easing_idle_flush_secs: 2,
@@ -361,6 +390,9 @@ impl ChatConfig {
                             "image_cache_multiplier": 4,
                             "image_cache_min": 8,
                             "image_fit_fraction": 0.7,
+                            "video_converter_path": "ffmpeg",
+                            "video_max_bytes": 10 * 1024 * 1024,
+                            "video_max_seconds": 30,
                             "fade_dim_fraction": 0.2,
                             "fade_dim_max_secs": 2,
                             "easing_idle_flush_secs": 2,
@@ -438,6 +470,34 @@ mod tests {
         let cfg: ChatConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(cfg.message_fade_secs, 30);
         assert_eq!(cfg.message_fade_mode, "dim");
+    }
+
+    #[test]
+    fn config_video_defaults_and_overrides() {
+        // Old configs without the video keys get the documented defaults.
+        let cfg: ChatConfig = serde_json::from_str(MINIMAL_CONFIG).unwrap();
+        assert_eq!(cfg.video_converter_path, "ffmpeg");
+        assert_eq!(cfg.video_max_bytes, 10 * 1024 * 1024);
+        assert_eq!(cfg.video_max_seconds, 30);
+
+        let json = format!(
+            "{},\n\"video_converter_path\": \"\",\n\"video_max_bytes\": 5,\n\"video_max_seconds\": 2\n}}",
+            &MINIMAL_CONFIG[..MINIMAL_CONFIG.len() - 1]
+        );
+        let cfg: ChatConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(cfg.video_converter_path, "");
+        assert_eq!(cfg.video_max_bytes, 5);
+        assert_eq!(cfg.video_max_seconds, 2);
+    }
+
+    #[test]
+    fn default_config_serializes_video_keys() {
+        let cfg = ChatConfig::default();
+        let json = serde_json::to_string(&cfg).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["video_converter_path"], "ffmpeg");
+        assert_eq!(parsed["video_max_bytes"], 10 * 1024 * 1024);
+        assert_eq!(parsed["video_max_seconds"], 30);
     }
 
     #[test]

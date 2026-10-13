@@ -425,6 +425,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.image_cache_multiplier,
         config.image_cache_min,
         config.image_fit_fraction,
+        config.video_converter_path.clone(),
+        config.video_max_bytes,
+        config.video_max_seconds,
     ));
     let image_map: Arc<HashMap<String, String>> =
         Arc::new(images::load_map(&config.image_map_path));
