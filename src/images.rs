@@ -405,14 +405,17 @@ impl ImageRenderer {
         // output); otherwise use the built-in renderer so the feature works
         // with no external dependency.
         if converter_available(&self.converter_path) {
-            self.convert_external(&bytes, out_w).await
+            self.convert_external(&bytes, out_w, out_h).await
         } else {
             self.convert_builtin(&img, out_w, out_h)
         }
     }
 
     /// Run the external `ascii-image-converter` on the downloaded bytes.
-    async fn convert_external(&self, bytes: &[u8], width: u32) -> RenderResult {
+    /// Passes both width and height via `--dimensions WxH` (the `-d` flag);
+    /// `--width` alone would ignore the chat-area height cap and let images
+    /// overflow the chat area.
+    async fn convert_external(&self, bytes: &[u8], out_w: u32, out_h: u32) -> RenderResult {
         let mut tmp = match tempfile::NamedTempFile::new() {
             Ok(t) => t,
             Err(_) => return RenderResult::Reason("conversion failed".to_string()),
@@ -424,8 +427,8 @@ impl ImageRenderer {
 
         let output = tokio::process::Command::new(&self.converter_path)
             .arg(&path)
-            .arg("--width")
-            .arg(width.to_string())
+            .arg("--dimensions")
+            .arg(format!("{out_w}x{out_h}"))
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .output()
@@ -520,11 +523,15 @@ fn extract_frames(bytes: &[u8], out_w: u32, out_h: u32) -> Option<RenderResult> 
 /// Compute the ascii cell dimensions so the image's longest dimension fits
 /// within `fraction` of the terminal (width and height), preserving aspect
 /// ratio (terminal cells are ~2:1 so rows = H/2 in cell units). Never upscales.
-/// The height is additionally capped at `rows - 6` so the art still fits the
-/// chat area alongside the bracket line, the content line and the spacer.
+/// The height is additionally capped so the whole image message (bracket line,
+/// content line, art and spacer) stays within `fraction` of the chat area
+/// (`rows - 3`, the header/status/footer are reserved): `image_h + 3 <=
+/// fraction * (rows - 3)`.
 fn fit_dimensions(cols: u16, rows: u16, iw: u32, ih: u32, fraction: f32) -> (u32, u32) {
     let max_w = ((cols as f32 * fraction) as usize).max(10);
-    let height_cap = rows.saturating_sub(6) as f32;
+    let chat_rows = rows.saturating_sub(3) as f32;
+    let overhead = 3.0;
+    let height_cap = (chat_rows * fraction - overhead).max(0.0);
     let max_h = ((rows as f32 * fraction).min(height_cap) as usize).max(3);
     let cell_w = iw as f32;
     let cell_h = ih as f32 / 2.0;
@@ -571,28 +578,38 @@ mod tests {
     #[test]
     fn fit_dimensions_tracks_terminal_resize() {
         // 400x400 square: cell = 400 wide x 200 tall.
-        // 120x30 terminal -> 0.8 => max 96x24 (cap rows-6 = 24) => scale = min(96/400, 24/200) = 0.12 -> 48x24
-        let (w1, h1) = fit_dimensions(120, 30, 400, 400, 0.8);
-        assert_eq!((w1, h1), (48, 24));
-        // Resized to 60x20 -> 0.8 => max 48x16, capped at rows-6 = 14 => scale = min(48/400, 14/200) = 0.07 -> 28x14
-        let (w2, h2) = fit_dimensions(60, 20, 400, 400, 0.8);
-        assert_eq!((w2, h2), (28, 14));
+        // 120x30 terminal -> 0.7 => max_w 84, chat_rows 27, cap = 27*0.7-3 = 15.9 => max_h 15
+        //   scale = min(84/400, 15/200) = 0.075 -> 30x15
+        let (w1, h1) = fit_dimensions(120, 30, 400, 400, 0.7);
+        assert_eq!((w1, h1), (30, 15));
+        // Resized to 60x20 -> max_w 42, chat_rows 17, cap = 17*0.7-3 = 8.9 => max_h 8
+        //   scale = min(42/400, 8/200) = 0.04 -> 16x8
+        let (w2, h2) = fit_dimensions(60, 20, 400, 400, 0.7);
+        assert_eq!((w2, h2), (16, 8));
         // A resize must produce a different size (so the cache re-renders).
         assert_ne!((w1, h1), (w2, h2));
 
         // Wide image: width-constrained.
-        // 800x200: cell = 800 x 100; at 120x30 -> max 96x24 -> scale = min(96/800, 24/100) = 0.12 -> 96x12
-        assert_eq!(fit_dimensions(120, 30, 800, 200, 0.8), (96, 12));
-        // Never upscale a tiny image.
-        // 40x40: cell = 40 x 20; at 120x30 -> scale would be >1, capped at 1 -> 40x20
-        assert_eq!(fit_dimensions(120, 30, 40, 40, 0.8), (40, 20));
+        // 800x200: cell = 800 x 100; at 120x30 -> max_w 84, max_h 15
+        //   scale = min(84/800, 15/100) = 0.105 -> 84x11 (10.5 rounds to 11)
+        assert_eq!(fit_dimensions(120, 30, 800, 200, 0.7), (84, 11));
+        // Small square is height-capped but never upscaled (scale stays < 1).
+        // 40x40: cell = 40 x 20; at 120x30 -> scale = min(84/40, 15/20) = 0.75 -> 30x15
+        assert_eq!(fit_dimensions(120, 30, 40, 40, 0.7), (30, 15));
     }
 
     #[test]
     fn square_source_fits_chat_area() {
         use crate::render::{rows_needed, RenderedLine};
         for rows in [24u16, 30u16] {
-            let (w, h) = fit_dimensions(120, rows, 400, 400, 0.8);
+            let (w, h) = fit_dimensions(120, rows, 400, 400, 0.7);
+            // The image message must stay within `fraction` of the chat area,
+            // where the chat area is `rows - 3` (header/status/footer reserved).
+            let budget = 0.7 * (rows as f32 - 3.0);
+            assert!(
+                (h + 3) as f32 <= budget,
+                "rows={rows} art_h={h} budget={budget} (image_h + 3 must fit)"
+            );
             // A one-line bracket + one-line content, then the art rows.
             let art: String = (0..h).map(|_| " ".repeat(w as usize) + "\n").collect();
             let line = RenderedLine {

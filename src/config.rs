@@ -203,7 +203,7 @@ fn default_image_cache_min() -> usize {
 }
 
 fn default_image_fit_fraction() -> f32 {
-    0.8
+    0.7
 }
 
 fn default_fade_dim_fraction() -> f32 {
@@ -291,7 +291,7 @@ impl Default for ChatConfig {
             image_timeout_secs: 15,
             image_cache_multiplier: 4,
             image_cache_min: 8,
-            image_fit_fraction: 0.8,
+            image_fit_fraction: 0.7,
             fade_dim_fraction: 0.2,
             fade_dim_max_secs: 2,
             easing_idle_flush_secs: 2,
@@ -343,7 +343,7 @@ impl ChatConfig {
                             "image_timeout_secs": 15,
                             "image_cache_multiplier": 4,
                             "image_cache_min": 8,
-                            "image_fit_fraction": 0.8,
+                            "image_fit_fraction": 0.7,
                             "fade_dim_fraction": 0.2,
                             "fade_dim_max_secs": 2,
                             "easing_idle_flush_secs": 2,
