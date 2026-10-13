@@ -179,6 +179,30 @@ fn gif_sibling_url(url: &str) -> Option<String> {
     })
 }
 
+/// Rewrite a klipy/tenor `.mp4`/`.webm` media URL to its static placeholder
+/// frame — the host's `preview` format, served as a `.png` for the same media
+/// id (query preserved). Used when no ffmpeg converter is available so a video
+/// gif still embeds as a still instead of failing. Returns `None` for a
+/// non-video URL.
+fn static_sibling_url(url: &str) -> Option<String> {
+    let (base, query) = match url.split_once('?') {
+        Some((b, q)) => (b, Some(q)),
+        None => (url, None),
+    };
+    let lower = base.to_ascii_lowercase();
+    let new_base = if lower.ends_with(".mp4") {
+        format!("{}.png", &base[..base.len() - 4])
+    } else if lower.ends_with(".webm") {
+        format!("{}.png", &base[..base.len() - 5])
+    } else {
+        return None;
+    };
+    Some(match query {
+        Some(q) => format!("{}?{}", new_base, q),
+        None => new_base,
+    })
+}
+
 /// True when an external converter is runnable. An explicit path (contains a
 /// separator) is checked directly; a bare program name is looked up on `PATH`
 /// (a `.exe` suffix is also tried on Windows).
@@ -283,8 +307,9 @@ pub struct ImageRenderer {
     cache_min: usize,
     /// Fraction of the terminal an embedded image may occupy.
     fit_fraction: f32,
-    /// External video→GIF converter (`ffmpeg`) path/name. Empty disables the
-    /// video-conversion flow (klipy/tenor videos then use their `.gif` sibling).
+    /// External video→GIF converter (`ffmpeg`) path/name. Empty/absent disables
+    /// conversion — klipy/tenor videos then embed as the host's static
+    /// placeholder frame (`.png`) instead.
     video_converter_path: String,
     /// Hard cap on a single downloaded video's bytes.
     video_max_bytes: usize,
@@ -367,11 +392,21 @@ impl ImageRenderer {
         }
 
         // Klipy/Tenor serve GIFs as `.mp4`/`.webm` which the `image` crate
-        // cannot decode: try the sibling `.gif` first, decode direct image
-        // URLs, and skip extension-less share URLs (needs their API).
+        // cannot decode. With no ffmpeg converter (or a failed conversion),
+        // fall back to the static placeholder frame the host serves for the
+        // same media id (`<id>.png`) and embed that as a still. Non-video URLs
+        // decode directly; extension-less share URLs need their API, so skip.
         let owned_target;
         let target = if is_klipy_or_tenor(url) {
-            if let Some(gif) = gif_sibling_url(url) {
+            if has_video_extension(url) {
+                match static_sibling_url(url) {
+                    Some(png) => {
+                        owned_target = png;
+                        owned_target.as_str()
+                    }
+                    None => return RenderResult::Reason("video gif not supported".to_string()),
+                }
+            } else if let Some(gif) = gif_sibling_url(url) {
                 owned_target = gif;
                 owned_target.as_str()
             } else if has_image_extension(url) {
@@ -901,6 +936,24 @@ mod tests {
         );
         assert_eq!(gif_sibling_url("https://static.klipy.com/a/x.gif"), None);
         assert_eq!(gif_sibling_url("https://x/a.png"), None);
+    }
+
+    #[test]
+    fn static_sibling_url_rewrites_video_to_placeholder_png() {
+        assert_eq!(
+            static_sibling_url("https://static.klipy.com/a/b/x.mp4").as_deref(),
+            Some("https://static.klipy.com/a/b/x.png")
+        );
+        assert_eq!(
+            static_sibling_url("https://media.tenor.com/a/x.webm").as_deref(),
+            Some("https://media.tenor.com/a/x.png")
+        );
+        assert_eq!(
+            static_sibling_url("https://static.klipy.com/a/x.mp4?t=1").as_deref(),
+            Some("https://static.klipy.com/a/x.png?t=1")
+        );
+        assert_eq!(static_sibling_url("https://static.klipy.com/a/x.gif"), None);
+        assert_eq!(static_sibling_url("https://x/a.png"), None);
     }
 
     #[test]
