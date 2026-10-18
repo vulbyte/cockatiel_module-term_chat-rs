@@ -8,9 +8,9 @@
       "x86_64": "target/release/term_display_rs"
     },
     "macos": {
-      "aarch64": "target/release/term_display_rs",
-      "arm": "target/release/term_display_rs",
-      "x86_64": "target/release/term_display_rs"
+      "aarch64": "target/release/term-chat.app/Contents/MacOS/term_display_rs",
+      "arm": "target/release/term-chat.app/Contents/MacOS/term_display_rs",
+      "x86_64": "target/release/term-chat.app/Contents/MacOS/term_display_rs"
     },
     "windows": {
       "aarch64": "target/release/term_display_rs.exe",
@@ -18,10 +18,9 @@
       "x86_64": "target/release/term_display_rs.exe"
     }
   },
-  "build_command": "cargo",
+  "build_command": "bash",
   "build_flags": [
-    "build",
-    "--release"
+    "build.sh"
   ],
   "capabilities": "output",
   "command_flags": [
