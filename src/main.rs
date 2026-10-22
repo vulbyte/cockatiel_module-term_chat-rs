@@ -570,6 +570,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // the chat stream — the TUI is the interface that
                             // answers them.
                             ModulePayload::Prompt(_) => {}
+                            ModulePayload::StatusNotice(notice) => {
+                                // A module surfaced a non-blocking status for the
+                                // UI (e.g. the YouTube adapter's quota banner).
+                                // Last write wins; an empty text clears it. A
+                                // non-zero ttl_secs clears it after that long.
+                                let text = notice.text;
+                                let ttl_secs = notice.ttl_secs;
+                                {
+                                    let mut s = status.lock().await;
+                                    s.notice = text.clone();
+                                }
+                                if ttl_secs > 0 && !text.is_empty() {
+                                    let status = Arc::clone(&status);
+                                    tokio::spawn(async move {
+                                        tokio::time::sleep(Duration::from_secs(ttl_secs as u64))
+                                            .await;
+                                        let mut s = status.lock().await;
+                                        if s.notice == text {
+                                            s.notice.clear();
+                                        }
+                                    });
+                                }
+                            }
                             other => {
                                 if let Some(item) = build_message_item(
                                     &other,

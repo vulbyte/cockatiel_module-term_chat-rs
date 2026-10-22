@@ -800,11 +800,11 @@ fn extract_frames(bytes: &[u8], out_w: u32, out_h: u32) -> Option<RenderResult> 
 /// ratio (terminal cells are ~2:1 so rows = H/2 in cell units). Never upscales.
 /// The height is additionally capped so the whole image message (bracket line,
 /// content line, art and spacer) stays within `fraction` of the chat area
-/// (`rows - 3`, the header/status/footer are reserved): `image_h + 3 <=
-/// fraction * (rows - 3)`.
+/// (`rows - 4`, the header/banner/status/footer are reserved): `image_h + 3 <=
+/// fraction * (rows - 4)`.
 fn fit_dimensions(cols: u16, rows: u16, iw: u32, ih: u32, fraction: f32) -> (u32, u32) {
     let max_w = ((cols as f32 * fraction) as usize).max(10);
-    let chat_rows = rows.saturating_sub(3) as f32;
+    let chat_rows = rows.saturating_sub(4) as f32;
     let overhead = 3.0;
     let height_cap = (chat_rows * fraction - overhead).max(0.0);
     let max_h = ((rows as f32 * fraction).min(height_cap) as usize).max(3);
@@ -853,11 +853,11 @@ mod tests {
     #[test]
     fn fit_dimensions_tracks_terminal_resize() {
         // 400x400 square: cell = 400 wide x 200 tall.
-        // 120x30 terminal -> 0.7 => max_w 84, chat_rows 27, cap = 27*0.7-3 = 15.9 => max_h 15
+        // 120x30 terminal -> 0.7 => max_w 84, chat_rows 26, cap = 26*0.7-3 = 15.2 => max_h 15
         //   scale = min(84/400, 15/200) = 0.075 -> 30x15
         let (w1, h1) = fit_dimensions(120, 30, 400, 400, 0.7);
         assert_eq!((w1, h1), (30, 15));
-        // Resized to 60x20 -> max_w 42, chat_rows 17, cap = 17*0.7-3 = 8.9 => max_h 8
+        // Resized to 60x20 -> max_w 42, chat_rows 16, cap = 16*0.7-3 = 8.2 => max_h 8
         //   scale = min(42/400, 8/200) = 0.04 -> 16x8
         let (w2, h2) = fit_dimensions(60, 20, 400, 400, 0.7);
         assert_eq!((w2, h2), (16, 8));
@@ -879,8 +879,9 @@ mod tests {
         for rows in [24u16, 30u16] {
             let (w, h) = fit_dimensions(120, rows, 400, 400, 0.7);
             // The image message must stay within `fraction` of the chat area,
-            // where the chat area is `rows - 3` (header/status/footer reserved).
-            let budget = 0.7 * (rows as f32 - 3.0);
+            // where the chat area is `rows - 4` (header/banner/status/footer
+            // reserved).
+            let budget = 0.7 * (rows as f32 - 4.0);
             assert!(
                 (h + 3) as f32 <= budget,
                 "rows={rows} art_h={h} budget={budget} (image_h + 3 must fit)"

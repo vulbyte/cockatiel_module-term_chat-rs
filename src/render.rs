@@ -251,7 +251,7 @@ pub fn draw(
     print!("\x1b[44m\x1b[37m{}\x1b[0m\r\n", padded_header);
 
     // 2. Message area
-    let max_chat_rows = rows.saturating_sub(3);
+    let max_chat_rows = rows.saturating_sub(4);
     let (start, count) = visible_range(messages.len(), ui.scroll);
 
     // Build rendered lines for the visible window, walking backwards from the
@@ -379,7 +379,30 @@ pub fn draw(
         print!("{}\r\n\r\n", content_line(line));
     }
 
-    // 3. Status bar
+    // 3. Status notice banner (optional; the row above the status bar).
+    // A module-surfaced notice (e.g. the YouTube adapter's quota banner) plus
+    // the operator's `extra_notif`, rendered on a highlighted line.
+    let mut banner = status.notice.clone();
+    if !config.extra_notif.is_empty() {
+        if !banner.is_empty() {
+            banner.push(' ');
+        }
+        banner.push_str(&config.extra_notif);
+    }
+    if !banner.is_empty() {
+        stdout.execute(cursor::MoveTo(0, rows.saturating_sub(3) as u16))?;
+        let mut banner_chars: Vec<char> = banner.chars().collect();
+        if banner_chars.len() > cols_usize {
+            banner_chars.truncate(cols_usize.saturating_sub(1));
+            banner_chars.push('…');
+        } else {
+            banner_chars.resize(cols_usize, ' ');
+        }
+        let banner_str: String = banner_chars.into_iter().collect();
+        print!("\x1b[43m\x1b[30m{}\x1b[0m", banner_str);
+    }
+
+    // 4. Status bar
     let dot_color = if status.connected {
         "\x1b[32m"
     } else {
@@ -421,7 +444,7 @@ pub fn draw(
         dot_color, rest_str
     );
 
-    // 4. Footer
+    // 5. Footer
     stdout.execute(cursor::MoveTo(0, rows.saturating_sub(1) as u16))?;
     let footer = if ui.mode == UiMode::Input {
         " input: type + enter to send | tab: platform | esc: cancel "
@@ -433,7 +456,7 @@ pub fn draw(
     let padded_footer = format!("{:^width$}", footer, width = cols_usize);
     print!("\x1b[90m{}\x1b[0m", padded_footer);
 
-    // 5. Overlays
+    // 6. Overlays
     draw_overlays(stdout, cols, rows, ui, login)?;
 
     stdout.flush()?;

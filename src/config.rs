@@ -34,6 +34,10 @@ pub struct ChatConfig {
     /// allow embedding when a Referer is present). Empty = no Referer.
     #[serde(default)]
     pub image_referer: String,
+    /// Operator-supplied text appended to the status-notice banner (e.g. a
+    /// "donate at ..." line or a maintenance note). Empty = nothing appended.
+    #[serde(default)]
+    pub extra_notif: String,
     // Emoji map
     pub emoji_enabled: bool,
     pub emoji_map_path: String,
@@ -308,6 +312,7 @@ impl Default for ChatConfig {
             image_map_path: "image_map.json".to_string(),
             image_min_rank: 0.0,
             image_referer: String::new(),
+            extra_notif: String::new(),
             emoji_enabled: true,
             emoji_map_path: "emoji_map.json".to_string(),
             max_buffered: 200,
@@ -377,6 +382,7 @@ impl ChatConfig {
                         let defaults = serde_json::json!({
                             "show_reprimand": true,
                             "show_status_color": true,
+                            "extra_notif": "",
                             "show_rank_color": true,
                             "show_score": true,
                             "show_score_color": true,

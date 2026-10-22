@@ -56,6 +56,9 @@ pub struct ChatMessageItem {
 pub struct AppStatus {
     pub connected: bool,
     pub detail: String,
+    /// The latest non-blocking status notice surfaced by a module (e.g. the
+    /// YouTube adapter's quota banner). Empty = no notice.
+    pub notice: String,
 }
 
 impl Default for AppStatus {
@@ -63,6 +66,7 @@ impl Default for AppStatus {
         Self {
             connected: true,
             detail: "connected to cockatiel engine".to_string(),
+            notice: String::new(),
         }
     }
 }
